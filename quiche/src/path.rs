@@ -41,6 +41,7 @@ use crate::Error;
 use crate::Result;
 use crate::StartupExit;
 
+use crate::get_min_initial_packet_size;
 use crate::pmtud;
 use crate::recovery;
 use crate::recovery::Bandwidth;
@@ -150,6 +151,9 @@ pub struct Path {
     /// when they were sent.
     in_flight_challenges: VecDeque<([u8; 8], usize, Instant)>,
 
+    /// The minimum supported MTU (QUIC version dependent).
+    pub minimum_supported_mtu: usize,
+
     /// The maximum challenge size that got acknowledged.
     max_challenge_size: usize,
 
@@ -237,22 +241,33 @@ impl Path {
             (PathState::Unknown, None, None)
         };
 
-        let pmtud = config.and_then(|c| {
-            if c.pmtud {
-                let maximum_supported_mtu: usize = std::cmp::min(
-                    // if the max_udp_payload_size doesn't fit into a usize, then
-                    // max_send_udp_payload_size must be smaller so use that
-                    c.local_transport_params
-                        .max_udp_payload_size
-                        .try_into()
-                        .unwrap_or(c.max_send_udp_payload_size),
-                    c.max_send_udp_payload_size,
-                );
-                Some(pmtud::Pmtud::new(maximum_supported_mtu))
-            } else {
-                None
-            }
-        });
+        let (minimum_supported_mtu, pmtud) = config
+            .map(|c| {
+                let minimum_supported_mtu =
+                    get_min_initial_packet_size(c.version);
+
+                let pmtud = if c.pmtud {
+                    let maximum_supported_mtu: usize = std::cmp::min(
+                        // if the max_udp_payload_size doesn't fit into a usize,
+                        // then max_send_udp_payload_size
+                        // must be smaller so use that
+                        c.local_transport_params
+                            .max_udp_payload_size
+                            .try_into()
+                            .unwrap_or(c.max_send_udp_payload_size),
+                        c.max_send_udp_payload_size,
+                    );
+                    Some(pmtud::Pmtud::new(
+                        minimum_supported_mtu,
+                        maximum_supported_mtu,
+                    ))
+                } else {
+                    None
+                };
+
+                (minimum_supported_mtu, pmtud)
+            })
+            .unwrap_or((crate::MIN_CLIENT_INITIAL_LEN, None));
 
         Self {
             local_addr,
@@ -264,6 +279,7 @@ impl Path {
             recovery: recovery::Recovery::new_with_config(recovery_config),
             pmtud,
             in_flight_challenges: VecDeque::new(),
+            minimum_supported_mtu,
             max_challenge_size: 0,
             probing_lost: 0,
             last_probe_lost_time: None,
@@ -439,7 +455,7 @@ impl Path {
             std::cmp::max(self.max_challenge_size, challenge_size);
 
         if self.state == PathState::ValidatingMTU {
-            if self.max_challenge_size >= crate::MIN_CLIENT_INITIAL_LEN {
+            if self.max_challenge_size >= self.minimum_supported_mtu {
                 // Path MTU is sufficient for QUIC traffic.
                 self.promote_to(PathState::Validated);
                 return true;
@@ -892,7 +908,10 @@ impl PathMap {
     ) {
         for (_, path) in self.paths.iter_mut() {
             path.pmtud = if discover {
-                Some(pmtud::Pmtud::new(max_send_udp_payload_size))
+                Some(pmtud::Pmtud::new(
+                    path.minimum_supported_mtu,
+                    max_send_udp_payload_size,
+                ))
             } else {
                 None
             };
@@ -1033,7 +1052,6 @@ impl std::fmt::Debug for PathStats {
 #[cfg(test)]
 mod tests {
     use crate::rand;
-    use crate::MIN_CLIENT_INITIAL_LEN;
 
     use crate::recovery::RecoveryConfig;
     use crate::Config;
@@ -1079,11 +1097,9 @@ mod tests {
         // Fake sending of PathChallenge in a packet of MIN_CLIENT_INITIAL_LEN - 1
         // bytes.
         let data = rand::rand_u64().to_be_bytes();
-        path_mgr.get_mut(pid).unwrap().add_challenge_sent(
-            data,
-            MIN_CLIENT_INITIAL_LEN - 1,
-            Instant::now(),
-        );
+        let path = path_mgr.get_mut(pid).unwrap();
+        let pkt_size = path.minimum_supported_mtu - 1;
+        path.add_challenge_sent(data, pkt_size, Instant::now());
 
         assert!(!path_mgr.get_mut(pid).unwrap().validation_requested());
         assert!(!path_mgr.get_mut(pid).unwrap().probing_required());
@@ -1109,11 +1125,9 @@ mod tests {
         // Fake sending of PathChallenge in a packet of MIN_CLIENT_INITIAL_LEN
         // bytes.
         let data = rand::rand_u64().to_be_bytes();
-        path_mgr.get_mut(pid).unwrap().add_challenge_sent(
-            data,
-            MIN_CLIENT_INITIAL_LEN,
-            Instant::now(),
-        );
+        let path = path_mgr.get_mut(pid).unwrap();
+        let pkt_size = path.minimum_supported_mtu;
+        path.add_challenge_sent(data, pkt_size, Instant::now());
 
         path_mgr.on_response_received(data).unwrap();
 
@@ -1161,18 +1175,17 @@ mod tests {
         // First probe.
         let data = rand::rand_u64().to_be_bytes();
 
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data, MIN_CLIENT_INITIAL_LEN, Instant::now());
+        let path = client_path_mgr.get_mut(client_pid).unwrap();
+        let pkt_size = path.minimum_supported_mtu;
+        path.add_challenge_sent(data, pkt_size, Instant::now());
 
         // Second probe.
         let data_2 = rand::rand_u64().to_be_bytes();
 
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data_2, MIN_CLIENT_INITIAL_LEN, Instant::now());
+        let path = client_path_mgr.get_mut(client_pid).unwrap();
+        let pkt_size = path.minimum_supported_mtu;
+        path.add_challenge_sent(data_2, pkt_size, Instant::now());
+
         assert_eq!(
             client_path_mgr
                 .get(client_pid)
@@ -1245,18 +1258,16 @@ mod tests {
         // First probe.
         let data = rand::rand_u64().to_be_bytes();
 
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data, MIN_CLIENT_INITIAL_LEN, Instant::now());
+        let path = client_path_mgr.get_mut(client_pid).unwrap();
+        let pkt_size = path.minimum_supported_mtu;
+        path.add_challenge_sent(data, pkt_size, Instant::now());
 
         // Second probe.
         let data_2 = rand::rand_u64().to_be_bytes();
 
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data_2, MIN_CLIENT_INITIAL_LEN, Instant::now());
+        let path = client_path_mgr.get_mut(client_pid).unwrap();
+        let pkt_size = path.minimum_supported_mtu;
+        path.add_challenge_sent(data_2, pkt_size, Instant::now());
         assert_eq!(
             client_path_mgr
                 .get(client_pid)
@@ -1269,10 +1280,9 @@ mod tests {
         // Third probe.
         let data_3 = rand::rand_u64().to_be_bytes();
 
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data_3, MIN_CLIENT_INITIAL_LEN, Instant::now());
+        let path = client_path_mgr.get_mut(client_pid).unwrap();
+        let pkt_size = path.minimum_supported_mtu;
+        path.add_challenge_sent(data_3, pkt_size, Instant::now());
         assert_eq!(
             client_path_mgr
                 .get(client_pid)
@@ -1285,10 +1295,9 @@ mod tests {
         // Fourth probe.
         let data_4 = rand::rand_u64().to_be_bytes();
 
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data_4, MIN_CLIENT_INITIAL_LEN, Instant::now());
+        let path = client_path_mgr.get_mut(client_pid).unwrap();
+        let pkt_size = path.minimum_supported_mtu;
+        path.add_challenge_sent(data_4, pkt_size, Instant::now());
         assert_eq!(
             client_path_mgr
                 .get(client_pid)

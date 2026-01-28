@@ -1,4 +1,4 @@
-// Copyright (C) 2019, Cloudflare, Inc.
+// Copyright 2026 Anapaya Systems
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
@@ -27,6 +27,9 @@
 #[macro_use]
 extern crate log;
 
+use clap::Parser;
+use scion_proto::address::SocketAddr;
+use scion_stack::scionstack::{ScionStackBuilder, SocketConfig};
 use squiche as quiche;
 use squiche::h3::NameValue;
 
@@ -34,47 +37,51 @@ use ring::rand::*;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
-fn main() {
+#[derive(Parser, Debug)]
+#[command(
+    name = "scion-http3-client",
+    about = "A simple HTTP/3 client example using SCION as the underlay", 
+    long_about = None
+)]
+struct Args {
+    #[arg(alias("st"), long, env = "SNAP_TOKEN")]
+    snap_token: String,
+
+    #[arg(alias("eh-api"), long)]
+    endhost_api: url::Url,
+
+    #[arg(alias("peer"), long)]
+    peer_scion_socket_addr: SocketAddr,
+
+    #[arg(alias("server"), long)]
+    server_name: String,
+
+    #[arg(alias("path"), long)]
+    request_path: String,
+}
+
+#[tokio::main]
+async fn main() {
+    env_logger::init();
+
     let mut buf = [0; 65535];
     let mut out = [0; MAX_DATAGRAM_SIZE];
 
-    let mut args = std::env::args();
+    let args = Args::parse();
 
-    let cmd = &args.next().unwrap();
+    let scion_stack = ScionStackBuilder::new(args.endhost_api)
+        .with_auth_token(args.snap_token)
+        .build()
+        .await
+        .unwrap();
 
-    if args.len() != 1 {
-        println!("Usage: {cmd} URL");
-        println!("\nSee tools/apps/ for more complete implementations.");
-        return;
-    }
-
-    let url = url::Url::parse(&args.next().unwrap()).unwrap();
-
-    // Setup the event loop.
-    let mut poll = mio::Poll::new().unwrap();
-    let mut events = mio::Events::with_capacity(1024);
-
-    // Resolve server address.
-    let peer_addr = url.socket_addrs(|| None).unwrap()[0];
-
-    // Bind to INADDR_ANY or IN6ADDR_ANY depending on the IP family of the
-    // server address. This is needed on macOS and BSD variants that don't
-    // support binding to IN6ADDR_ANY for both v4 and v6.
-    let bind_addr = match peer_addr {
-        std::net::SocketAddr::V4(_) => "0.0.0.0:0",
-        std::net::SocketAddr::V6(_) => "[::]:0",
-    };
-
-    // Create the UDP socket backing the QUIC connection, and register it with
-    // the event loop.
-    let mut socket =
-        mio::net::UdpSocket::bind(bind_addr.parse().unwrap()).unwrap();
-    poll.registry()
-        .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
+    let socket = scion_stack
+        .bind_with_config(None, SocketConfig::default())
+        .await
         .unwrap();
 
     // Create the configuration for the QUIC connection.
-    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    let mut config = quiche::Config::new(quiche::SCION_PROTOCOL_VERSION).unwrap();
 
     // *CAUTION*: this should not be set to `false` in production!!!
     config.verify_peer(false);
@@ -103,28 +110,25 @@ fn main() {
     let scid = quiche::ConnectionId::from_ref(&scid);
 
     // Get local address.
-    let local_addr = socket.local_addr().unwrap();
+    let local_addr = socket.local_addr().local_address().unwrap();
+    let peer_addr = args.peer_scion_socket_addr.local_address().unwrap();
 
     // Create a QUIC connection and initiate handshake.
     let mut conn =
-        quiche::connect(url.domain(), &scid, local_addr, peer_addr, &mut config)
+        quiche::connect(Some(&args.server_name), &scid, local_addr, peer_addr, &mut config)
             .unwrap();
 
     info!(
         "connecting to {:} from {:} with scid {}",
         peer_addr,
-        socket.local_addr().unwrap(),
+        local_addr,
         hex_dump(&scid)
     );
 
     let (write, send_info) = conn.send(&mut out).expect("initial send failed");
 
-    while let Err(e) = socket.send_to(&out[..write], send_info.to) {
-        if e.kind() == std::io::ErrorKind::WouldBlock {
-            debug!("send() would block");
-            continue;
-        }
-
+    let dst = SocketAddr::from_std(args.peer_scion_socket_addr.isd_asn(), send_info.to);
+    while let Err(e) = socket.send_to(&out[..write], dst).await {
         panic!("send() failed: {e:?}");
     }
 
@@ -133,22 +137,12 @@ fn main() {
     let h3_config = quiche::h3::Config::new().unwrap();
 
     // Prepare request.
-    let mut path = String::from(url.path());
-
-    if let Some(query) = url.query() {
-        path.push('?');
-        path.push_str(query);
-    }
-
     let req = vec![
-        quiche::h3::Header::new(b":method", b"GET"),
-        quiche::h3::Header::new(b":scheme", url.scheme().as_bytes()),
-        quiche::h3::Header::new(
-            b":authority",
-            url.host_str().unwrap().as_bytes(),
-        ),
-        quiche::h3::Header::new(b":path", path.as_bytes()),
-        quiche::h3::Header::new(b"user-agent", b"quiche"),
+        quiche::h3::Header::new(b":method", b"POST"),
+        quiche::h3::Header::new(b":scheme", b"https"),
+        quiche::h3::Header::new(b":authority", b"localhost"),
+        quiche::h3::Header::new(b":path", args.request_path.as_bytes()),
+        quiche::h3::Header::new(b"user-agent", b"squiche"),
     ];
 
     let req_start = std::time::Instant::now();
@@ -156,55 +150,47 @@ fn main() {
     let mut req_sent = false;
 
     loop {
-        poll.poll(&mut events, conn.timeout()).unwrap();
+        // Handle timeouts.
+        conn.on_timeout();
 
         // Read incoming UDP packets from the socket and feed them to quiche,
         // until there are no more packets to read.
         'read: loop {
-            // If the event loop reported no events, it means that the timeout
-            // has expired, so handle it without attempting to read packets. We
-            // will then proceed with the send loop.
-            if events.is_empty() {
-                debug!("timed out");
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                    debug!("no more packets to read");
+                    break 'read;
+                }
 
-                conn.on_timeout();
+                result = socket.recv_from(&mut buf) => {
+                    let (len, from) = match result {
+                        Ok(v) => v,
 
-                break 'read;
+                        Err(e) => {
+                            panic!("recv() failed: {e:?}");
+                        }
+                    };
+
+                    debug!("got {len} bytes");
+
+                    let recv_info = quiche::RecvInfo {
+                        to: local_addr,
+                        from: from.local_address().unwrap(),
+                    };
+
+                    // Process potentially coalesced packets.
+                    let read = match conn.recv(&mut buf[..len], recv_info) {
+                        Ok(v) => v,
+
+                        Err(e) => {
+                            error!("recv failed: {e:?}");
+                            continue 'read;
+                        },
+                    };
+
+                    debug!("processed {read} bytes");
+                }
             }
-
-            let (len, from) = match socket.recv_from(&mut buf) {
-                Ok(v) => v,
-
-                Err(e) => {
-                    // There are no more UDP packets to read, so end the read
-                    // loop.
-                    if e.kind() == std::io::ErrorKind::WouldBlock {
-                        debug!("recv() would block");
-                        break 'read;
-                    }
-
-                    panic!("recv() failed: {e:?}");
-                },
-            };
-
-            debug!("got {len} bytes");
-
-            let recv_info = quiche::RecvInfo {
-                to: local_addr,
-                from,
-            };
-
-            // Process potentially coalesced packets.
-            let read = match conn.recv(&mut buf[..len], recv_info) {
-                Ok(v) => v,
-
-                Err(e) => {
-                    error!("recv failed: {e:?}");
-                    continue 'read;
-                },
-            };
-
-            debug!("processed {read} bytes");
         }
 
         debug!("done reading");
@@ -216,6 +202,7 @@ fn main() {
 
         // Create a new HTTP/3 connection once the QUIC connection is established.
         if conn.is_established() && http3_conn.is_none() {
+            info!("QUIC connection established, creating HTTP/3 connection");
             http3_conn = Some(
                 quiche::h3::Connection::with_transport(&mut conn, &h3_config)
                 .expect("Unable to create HTTP/3 connection, check the server's uni stream limit and window size"),
@@ -313,12 +300,8 @@ fn main() {
                 },
             };
 
-            if let Err(e) = socket.send_to(&out[..write], send_info.to) {
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    debug!("send() would block");
-                    break;
-                }
-
+            let dst = SocketAddr::from_std(args.peer_scion_socket_addr.isd_asn(), send_info.to);
+            if let Err(e) = socket.send_to(&out[..write], dst).await {
                 panic!("send() failed: {e:?}");
             }
 

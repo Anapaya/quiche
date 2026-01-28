@@ -1,9 +1,11 @@
 /// Contains the logic to implement PMTUD. Given a maximum supported MTU,
-/// finds the PMTU between the given max and [`MIN_CLIENT_INITIAL_LEN`].
-use crate::MIN_CLIENT_INITIAL_LEN;
+/// finds the PMTU between the given max and the QUIC version specific minimum.
 
 #[derive(Default)]
 pub struct Pmtud {
+    /// The minimum supported MTU (QUIC version dependent).
+    minimum_supported_mtu: usize,
+
     /// The PMTU after the completion of PMTUD.
     /// Will be [`None`] if the PMTU is less than the minimum supported MTU.
     pmtu: Option<usize>,
@@ -27,8 +29,11 @@ pub struct Pmtud {
 
 impl Pmtud {
     /// Creates new PMTUD instance.
-    pub fn new(maximum_supported_mtu: usize) -> Self {
+    pub fn new(
+        minimum_supported_mtu: usize, maximum_supported_mtu: usize,
+    ) -> Self {
         Self {
+            minimum_supported_mtu,
             maximum_supported_mtu,
             probe_size: maximum_supported_mtu,
             ..Default::default()
@@ -42,7 +47,7 @@ impl Pmtud {
     pub fn should_probe(&self) -> bool {
         !self.in_flight &&
             self.pmtu.is_none() &&
-            self.smallest_failed_probe_size != Some(MIN_CLIENT_INITIAL_LEN)
+            self.smallest_failed_probe_size != Some(self.minimum_supported_mtu)
     }
 
     /// Sets the PMTUD probe size.
@@ -59,7 +64,7 @@ impl Pmtud {
     /// returns the minimum supported MTU.
     pub fn get_current_mtu(&self) -> usize {
         self.largest_successful_probe_size
-            .unwrap_or(MIN_CLIENT_INITIAL_LEN)
+            .unwrap_or(self.minimum_supported_mtu)
     }
 
     /// Returns the PMTU.
@@ -105,7 +110,8 @@ impl Pmtud {
             // With only failed probes, binary search between the smallest failed
             // probe and the minimum supported MTU
             (Some(failed_probe_size), None) =>
-                self.probe_size = (MIN_CLIENT_INITIAL_LEN + failed_probe_size) / 2,
+                self.probe_size =
+                    (self.minimum_supported_mtu + failed_probe_size) / 2,
 
             // As the algorithm is optimistic in that the initial probe size
             // is the maximum supported MTU, then having only a successful probe
@@ -142,7 +148,7 @@ impl Pmtud {
     /// Records a failed probe
     pub fn failed_probe(&mut self, probe_size: usize) {
         // Treat errant probes as if they failed at the minimum supported MTU
-        let probe_size = std::cmp::max(probe_size, MIN_CLIENT_INITIAL_LEN);
+        let probe_size = std::cmp::max(probe_size, self.minimum_supported_mtu);
 
         // Check if we have one instance of a failed probe so that a min
         // comparison can be made otherwise if this is the first failed
@@ -188,11 +194,13 @@ impl std::fmt::Debug for Pmtud {
 
 #[cfg(test)]
 mod tests {
+    use crate::MIN_CLIENT_INITIAL_LEN;
+
     use super::*;
 
     #[test]
     fn pmtud_initial_state() {
-        let pmtud = Pmtud::new(1350);
+        let pmtud = Pmtud::new(MIN_CLIENT_INITIAL_LEN, 1350);
         assert_eq!(pmtud.get_current_mtu(), 1200);
         assert_eq!(pmtud.get_probe_size(), 1350);
         assert!(pmtud.should_probe());
@@ -200,7 +208,7 @@ mod tests {
 
     #[test]
     fn pmtud_binary_search_algorithm() {
-        let mut pmtud = Pmtud::new(1500);
+        let mut pmtud = Pmtud::new(MIN_CLIENT_INITIAL_LEN, 1500);
 
         // Set initial probe size to 1500
         assert_eq!(pmtud.get_probe_size(), 1500);
@@ -246,7 +254,7 @@ mod tests {
 
     #[test]
     fn pmtud_probe_lost_behavior() {
-        let mut pmtud = Pmtud::new(1500);
+        let mut pmtud = Pmtud::new(MIN_CLIENT_INITIAL_LEN, 1500);
 
         // Simulate probe loss
         pmtud.failed_probe(1500);
@@ -260,7 +268,7 @@ mod tests {
 
     #[test]
     fn pmtud_successful_probe() {
-        let mut pmtud = Pmtud::new(1400);
+        let mut pmtud = Pmtud::new(MIN_CLIENT_INITIAL_LEN, 1400);
 
         // Simulate successful probe
         pmtud.successful_probe(1400);
@@ -270,7 +278,7 @@ mod tests {
 
     #[test]
     fn pmtud_binary_search_convergence() {
-        let mut pmtud = Pmtud::new(2000);
+        let mut pmtud = Pmtud::new(MIN_CLIENT_INITIAL_LEN, 2000);
 
         // Simulate repeated probe losses to test convergence
         pmtud_test_runner(&mut pmtud, 1200);
@@ -286,7 +294,7 @@ mod tests {
     /// to verify the PMTU discovery process.
     #[test]
     fn test_pmtud_reset() {
-        let mut pmtud = Pmtud::new(1350);
+        let mut pmtud = Pmtud::new(MIN_CLIENT_INITIAL_LEN, 1350);
         pmtud.successful_probe(1350);
         assert_eq!(pmtud.pmtu, Some(1350));
         assert!(!pmtud.should_probe());
@@ -301,7 +309,7 @@ mod tests {
     /// Test case for receiving a probe outside the defined supported MTU range.
     #[test]
     fn test_pmtud_errant_probe() {
-        let mut pmtud = Pmtud::new(1350);
+        let mut pmtud = Pmtud::new(MIN_CLIENT_INITIAL_LEN, 1350);
         pmtud.successful_probe(1500);
         // Even though we've received a probe larger than supported
         // maximum MTU, the PMTU should still respect the configured maximum
@@ -324,7 +332,7 @@ mod tests {
     /// when the PMTU is equal to the minimum supported MTU.
     #[test]
     fn test_pmtu_equal_to_min_supported_mtu() {
-        let mut pmtud = Pmtud::new(1350);
+        let mut pmtud = Pmtud::new(MIN_CLIENT_INITIAL_LEN, 1350);
         pmtud_test_runner(&mut pmtud, 1200);
     }
 
@@ -334,7 +342,7 @@ mod tests {
     /// when the PMTU is greater than the minimum supported MTU.
     #[test]
     fn test_pmtu_greater_than_min_supported_mtu() {
-        let mut pmtud = Pmtud::new(1350);
+        let mut pmtud = Pmtud::new(MIN_CLIENT_INITIAL_LEN, 1350);
         pmtud_test_runner(&mut pmtud, 1500);
     }
 
@@ -344,7 +352,7 @@ mod tests {
     /// the case when the PMTU is less than the minimum supported MTU.
     #[test]
     fn test_pmtu_less_than_min_supported_mtu() {
-        let mut pmtud = Pmtud::new(1350);
+        let mut pmtud = Pmtud::new(MIN_CLIENT_INITIAL_LEN, 1350);
         pmtud_test_runner(&mut pmtud, 1100);
     }
 
@@ -355,7 +363,7 @@ mod tests {
     /// validation probe.
     #[test]
     fn test_pmtu_revalidation() {
-        let mut pmtud = Pmtud::new(1350);
+        let mut pmtud = Pmtud::new(MIN_CLIENT_INITIAL_LEN, 1350);
         pmtud.set_probe_size(1350);
         pmtud.successful_probe(1350);
 
@@ -374,7 +382,7 @@ mod tests {
     /// PMTU.
     fn pmtud_test_runner(pmtud: &mut Pmtud, test_pmtu: usize) {
         // Loop until the PMTU is found or the minimum supported MTU is reached
-        while pmtud.get_probe_size() >= MIN_CLIENT_INITIAL_LEN {
+        while pmtud.get_probe_size() >= pmtud.minimum_supported_mtu {
             // Send a probe with the current probe size
             let probe_size = pmtud.get_probe_size();
 
@@ -390,7 +398,7 @@ mod tests {
             // If the probe size hasn't changed and is equal to the minimum
             // supported MTU, break the loop
             if pmtud.get_probe_size() == probe_size &&
-                probe_size == MIN_CLIENT_INITIAL_LEN
+                probe_size == pmtud.minimum_supported_mtu
             {
                 break;
             }
@@ -402,7 +410,7 @@ mod tests {
         }
 
         // Verify that the PMTU is correct
-        if test_pmtu < MIN_CLIENT_INITIAL_LEN {
+        if test_pmtu < pmtud.minimum_supported_mtu {
             assert_eq!(pmtud.get_pmtu(), None);
         } else if test_pmtu > pmtud.maximum_supported_mtu {
             assert_eq!(pmtud.get_pmtu(), Some(pmtud.maximum_supported_mtu));

@@ -17,7 +17,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-repository = "https://github.com/cloudflare/quiche"
+repository = "https://github.com/Anapaya/quiche"
 license = "BSD-2-Clause"
 readme = "README.md"
 keywords = ["quic", "http3"]
@@ -36,6 +36,7 @@ anyhow = { version = "1" }
 assert_matches = { version = "1" }
 boring = { version = "4.3" }
 buffer-pool = { version = "0.1.0", path = "./buffer-pool" }
+clap = { version = "4.5.48" }
 crossbeam = { version = "0.8.1", default-features = false }
 dashmap = { version = "6" }
 datagram-socket = { version = "0.5.0", path = "./datagram-socket" }
@@ -54,7 +55,7 @@ octets = { version = "0.3.4", path = "./octets" }
 parking_lot = { version = "0.12.1", default-features = false }
 pin-project = { version = "1.0.12" }
 qlog = { version = "0.15.2", path = "./qlog" }
-quiche = { version = "0.24.8", path = "./quiche" }
+quiche = { package = "squiche", version = "0.24.8-ana.0", path = "./quiche" }
 regex = { version = "1.4.2" }
 ring = { version = "0.17.8" }
 rstest = { version = "0.26.1" }
@@ -63,6 +64,8 @@ serde_json = { version = "1" }
 serde_with = { version = "3.3", default-features = false }
 slog-scope = { version = "4.0" }
 slog-stdlog = { version = "4.1.1" }
+scion-proto = { version = "0.3.0" }
+scion-stack = { version = "0.3.0" }
 smallvec = { version = "1.10", default-features = false }
 task-killswitch = { version = "0.2.0", path = "./task-killswitch" }
 thiserror = { version = "2" }

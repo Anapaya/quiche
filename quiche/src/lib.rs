@@ -434,14 +434,24 @@ use crate::stream::StreamPriorityKey;
 /// The current QUIC wire version.
 pub const PROTOCOL_VERSION: u32 = PROTOCOL_VERSION_V1;
 
+/// The current SCION QUIC wire version.
+pub const SCION_PROTOCOL_VERSION: u32 = SCION_PROTOCOL_VERSION_V1;
+
 /// Supported QUIC versions.
 const PROTOCOL_VERSION_V1: u32 = 0x0000_0001;
+
+/// Supported SCION QUIC versions.
+const SCION_PROTOCOL_VERSION_V1: u32 = 0x5c10000f;
 
 /// The maximum length of a connection ID.
 pub const MAX_CONN_ID_LEN: usize = packet::MAX_CID_LEN as usize;
 
 /// The minimum length of Initial packets sent by a client.
 pub const MIN_CLIENT_INITIAL_LEN: usize = 1200;
+
+/// The minumum length of Initial packet sent by a client using the
+/// [SCION_PROTOCOL_VERSION].
+pub const MIN_SCION_CLIENT_INITIAL_LEN: usize = 600;
 
 /// The default initial RTT.
 const DEFAULT_INITIAL_RTT: Duration = Duration::from_millis(333);
@@ -505,6 +515,16 @@ const MAX_CRYPTO_STREAM_OFFSET: u64 = 1 << 16;
 // The send capacity factor.
 const TX_CAP_FACTOR: f64 = 1.0;
 
+/// Get the minimum initial packet size based on the QUIC version.
+#[inline]
+pub fn get_min_initial_packet_size(version: u32) -> usize {
+    if version == SCION_PROTOCOL_VERSION {
+        return MIN_SCION_CLIENT_INITIAL_LEN;
+    }
+
+    MIN_CLIENT_INITIAL_LEN
+}
+
 /// Ancillary information about incoming packets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecvInfo {
@@ -563,6 +583,7 @@ pub enum QlogLevel {
 }
 
 /// Stores configuration shared between multiple connections.
+
 pub struct Config {
     local_transport_params: TransportParams,
 
@@ -1684,7 +1705,8 @@ pub fn retry(
 /// Returns true if the given protocol version is supported.
 #[inline]
 pub fn version_is_supported(version: u32) -> bool {
-    matches!(version, PROTOCOL_VERSION_V1)
+    matches!(version, PROTOCOL_VERSION_V1) ||
+        matches!(version, SCION_PROTOCOL_VERSION_V1)
 }
 
 /// Pushes a frame to the output packet if there is enough space.
@@ -2001,7 +2023,7 @@ impl<F: BufFactory> Connection<F> {
         conn.handshake.init(is_server)?;
 
         conn.handshake
-            .use_legacy_codepoint(config.version != PROTOCOL_VERSION_V1);
+            .use_legacy_codepoint(!version_is_supported(config.version));
 
         conn.encode_transport_params()?;
 
@@ -2791,7 +2813,7 @@ impl<F: BufFactory> Connection<F> {
             self.crypto_ctx[packet::Epoch::Initial].crypto_seal = Some(aead_seal);
 
             self.handshake
-                .use_legacy_codepoint(self.version != PROTOCOL_VERSION_V1);
+                .use_legacy_codepoint(!version_is_supported(self.version));
 
             // Encode transport parameters again, as the new version might be
             // using a different format.
@@ -2866,7 +2888,7 @@ impl<F: BufFactory> Connection<F> {
             self.did_version_negotiation = true;
 
             self.handshake
-                .use_legacy_codepoint(self.version != PROTOCOL_VERSION_V1);
+                .use_legacy_codepoint(version_is_supported(self.version));
 
             // Encode transport parameters again, as the new version might be
             // using a different format.
@@ -3787,8 +3809,9 @@ impl<F: BufFactory> Connection<F> {
             return Err(Error::Done);
         }
 
-        if has_initial && left > 0 && done < MIN_CLIENT_INITIAL_LEN {
-            let pad_len = cmp::min(left, MIN_CLIENT_INITIAL_LEN - done);
+        let min_initial_packet_size = get_min_initial_packet_size(self.version);
+        if has_initial && left > 0 && done < min_initial_packet_size {
+            let pad_len = cmp::min(left, min_initial_packet_size - done);
 
             // Fill padding area with null bytes, to avoid leaking information
             // in case the application reuses the packet buffer.
@@ -6031,8 +6054,8 @@ impl<F: BufFactory> Connection<F> {
         }
 
         // Allow for 1200 bytes (minimum QUIC packet size) during the
-        // handshake.
-        MIN_CLIENT_INITIAL_LEN
+        // handshake or 600 bytes for QUIC over SCION.
+        get_min_initial_packet_size(self.version)
     }
 
     /// Schedule an ack-eliciting packet on the active path.
@@ -8412,6 +8435,7 @@ impl<F: BufFactory> Connection<F> {
             None,
         );
 
+        path.minimum_supported_mtu = get_min_initial_packet_size(self.version);
         path.max_send_bytes = buf_len * self.max_amplification_factor;
         path.active_scid_seq = Some(in_scid_seq);
 
@@ -8538,6 +8562,8 @@ impl<F: BufFactory> Connection<F> {
             false,
             None,
         );
+
+        path.minimum_supported_mtu = get_min_initial_packet_size(self.version);
         path.active_dcid_seq = Some(dcid_seq);
 
         let pid = self
