@@ -32,7 +32,7 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 
-use quiche::h3;
+use squiche::h3;
 
 fn main() {
     let mut args = std::env::args();

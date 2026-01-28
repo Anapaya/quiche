@@ -41,6 +41,7 @@ use crate::Error;
 use crate::Result;
 use crate::StartupExit;
 
+use crate::get_min_initial_packet_size;
 use crate::pmtud;
 use crate::recovery;
 use crate::recovery::Bandwidth;
@@ -150,6 +151,9 @@ pub struct Path {
     /// when they were sent.
     in_flight_challenges: VecDeque<([u8; 8], usize, Instant)>,
 
+    /// The minimum supported MTU (QUIC version dependent).
+    pub minimum_supported_mtu: usize,
+
     /// The maximum challenge size that got acknowledged.
     max_challenge_size: usize,
 
@@ -240,22 +244,34 @@ impl Path {
             (PathState::Unknown, None, None)
         };
 
-        let pmtud = config.and_then(|c| {
-            if c.pmtud {
-                let maximum_supported_mtu: usize = std::cmp::min(
-                    // if the max_udp_payload_size doesn't fit into a usize, then
-                    // max_send_udp_payload_size must be smaller so use that
-                    c.local_transport_params
-                        .max_udp_payload_size
-                        .try_into()
-                        .unwrap_or(c.max_send_udp_payload_size),
-                    c.max_send_udp_payload_size,
-                );
-                Some(pmtud::Pmtud::new(maximum_supported_mtu, c.pmtud_max_probes))
-            } else {
-                None
-            }
-        });
+        let (minimum_supported_mtu, pmtud) = config
+            .map(|c| {
+                let minimum_supported_mtu =
+                    get_min_initial_packet_size(c.version);
+
+                let pmtud = if c.pmtud {
+                    let maximum_supported_mtu: usize = std::cmp::min(
+                        // if the max_udp_payload_size doesn't fit into a usize,
+                        // then max_send_udp_payload_size
+                        // must be smaller so use that
+                        c.local_transport_params
+                            .max_udp_payload_size
+                            .try_into()
+                            .unwrap_or(c.max_send_udp_payload_size),
+                        c.max_send_udp_payload_size,
+                    );
+                    Some(pmtud::Pmtud::new(
+                        minimum_supported_mtu,
+                        maximum_supported_mtu,
+                        c.pmtud_max_probes,
+                    ))
+                } else {
+                    None
+                };
+
+                (minimum_supported_mtu, pmtud)
+            })
+            .unwrap_or((crate::MIN_CLIENT_INITIAL_LEN, None));
 
         Self {
             local_addr,
@@ -267,6 +283,7 @@ impl Path {
             recovery: recovery::Recovery::new_with_config(recovery_config),
             pmtud,
             in_flight_challenges: VecDeque::new(),
+            minimum_supported_mtu,
             max_challenge_size: 0,
             probing_lost: 0,
             last_probe_lost_time: None,
@@ -443,7 +460,7 @@ impl Path {
             std::cmp::max(self.max_challenge_size, challenge_size);
 
         if self.state == PathState::ValidatingMTU {
-            if self.max_challenge_size >= crate::MIN_CLIENT_INITIAL_LEN {
+            if self.max_challenge_size >= self.minimum_supported_mtu {
                 // Path MTU is sufficient for QUIC traffic.
                 self.promote_to(PathState::Validated);
                 return true;
@@ -913,6 +930,7 @@ impl PathMap {
         for (_, path) in self.paths.iter_mut() {
             path.pmtud = if discover {
                 Some(pmtud::Pmtud::new(
+                    path.minimum_supported_mtu,
                     max_send_udp_payload_size,
                     pmtud_max_probes,
                 ))
