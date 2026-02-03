@@ -3169,7 +3169,7 @@ impl<F: BufFactory> Connection<F> {
             self.did_version_negotiation = true;
 
             self.handshake
-                .use_legacy_codepoint(version_is_supported(self.version));
+                .use_legacy_codepoint(!version_is_supported(self.version));
 
             // Encode transport parameters again, as the new version might be
             // using a different format.

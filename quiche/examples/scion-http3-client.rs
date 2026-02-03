@@ -29,7 +29,8 @@ extern crate log;
 
 use clap::Parser;
 use scion_proto::address::SocketAddr;
-use scion_stack::scionstack::{ScionStackBuilder, SocketConfig};
+use scion_stack::scionstack::ScionStackBuilder;
+use scion_stack::scionstack::SocketConfig;
 use squiche as quiche;
 use squiche::h3::NameValue;
 
@@ -114,9 +115,14 @@ async fn main() {
     let peer_addr = args.peer_scion_socket_addr.local_address().unwrap();
 
     // Create a QUIC connection and initiate handshake.
-    let mut conn =
-        quiche::connect(Some(&args.server_name), &scid, local_addr, peer_addr, &mut config)
-            .unwrap();
+    let mut conn = quiche::connect(
+        Some(&args.server_name),
+        &scid,
+        local_addr,
+        peer_addr,
+        &mut config,
+    )
+    .unwrap();
 
     info!(
         "connecting to {:} from {:} with scid {}",
@@ -127,7 +133,8 @@ async fn main() {
 
     let (write, send_info) = conn.send(&mut out).expect("initial send failed");
 
-    let dst = SocketAddr::from_std(args.peer_scion_socket_addr.isd_asn(), send_info.to);
+    let dst =
+        SocketAddr::from_std(args.peer_scion_socket_addr.isd_asn(), send_info.to);
     while let Err(e) = socket.send_to(&out[..write], dst).await {
         panic!("send() failed: {e:?}");
     }
@@ -300,7 +307,10 @@ async fn main() {
                 },
             };
 
-            let dst = SocketAddr::from_std(args.peer_scion_socket_addr.isd_asn(), send_info.to);
+            let dst = SocketAddr::from_std(
+                args.peer_scion_socket_addr.isd_asn(),
+                send_info.to,
+            );
             if let Err(e) = socket.send_to(&out[..write], dst).await {
                 panic!("send() failed: {e:?}");
             }
