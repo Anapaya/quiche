@@ -38,6 +38,7 @@
 //! Application Layer Protocol Negotiation (ALPN) Protocol ID:
 //!
 //! ```
+//! use squiche as quiche;
 //! let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 //! config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL)?;
 //! # Ok::<(), quiche::Error>(())
@@ -49,6 +50,7 @@
 //! connection is creating its configuration object:
 //!
 //! ```
+//! use squiche as quiche;
 //! let h3_config = quiche::h3::Config::new()?;
 //! # Ok::<(), quiche::h3::Error>(())
 //! ```
@@ -58,6 +60,7 @@
 //! connection:
 //!
 //! ```no_run
+//! # use squiche as quiche;
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
 //! # let peer = "127.0.0.1:1234".parse().unwrap();
@@ -75,6 +78,7 @@
 //! causes the requests to get sent to the peer:
 //!
 //! ```no_run
+//! # use squiche as quiche;
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
 //! # let peer = "127.0.0.1:1234".parse().unwrap();
@@ -98,6 +102,7 @@
 //! the connection's [`send_body()`] method:
 //!
 //! ```no_run
+//! # use squiche as quiche;
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
 //! # let peer = "127.0.0.1:1234".parse().unwrap();
@@ -129,6 +134,7 @@
 //!
 //! ```no_run
 //! use quiche::h3::NameValue;
+//! use squiche as quiche;
 //!
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
@@ -195,6 +201,7 @@
 //! An HTTP/3 client uses [`poll()`] to read responses:
 //!
 //! ```no_run
+//! use squiche as quiche;
 //! use quiche::h3::NameValue;
 //!
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();

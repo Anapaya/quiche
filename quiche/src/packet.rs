@@ -335,6 +335,7 @@ impl<'a> Header<'a> {
     /// ## Examples:
     ///
     /// ```no_run
+    /// use squiche as quiche;
     /// # const LOCAL_CONN_ID_LEN: usize = 16;
     /// # let mut buf = [0; 512];
     /// # let mut out = [0; 512];

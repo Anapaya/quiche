@@ -39,12 +39,12 @@ jobs:
           sudo apt-get install libexpat1-dev libfreetype6-dev libfontconfig1-dev
 
       - name: Run cargo test
-        run: cargo test --verbose --all-targets --features=boringssl-boring-crate,${{ env.FEATURES }}
+        run: cargo test -p squiche --verbose --all-targets --features=boringssl-boring-crate,${{ env.FEATURES }}
 
       # Need to run doc tests separately.
       # (https://github.com/rust-lang/cargo/issues/6669)
       - name: Run cargo doc test
-        run: cargo test --verbose --doc --features=boringssl-boring-crate,${{ env.FEATURES }}
+        run: cargo test -p squiche --verbose --doc --features=boringssl-boring-crate,${{ env.FEATURES }}
 
       # NOTE: this is disabled as it fails when building changes that bump
       # version of local crates (e.g. when doing a `qlog` release) that have not
@@ -54,7 +54,7 @@ jobs:
       #   run: cargo package --verbose --workspace --exclude=quiche_apps --allow-dirty
 
       - name: Run cargo doc
-        run: cargo doc --no-deps --all-features --document-private-items
+        run: cargo doc -p squiche --no-deps --all-features --document-private-items
 
       - name: Build C examples
         run: |
