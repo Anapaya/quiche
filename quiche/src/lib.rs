@@ -41,6 +41,7 @@
 //! [`Config`] object:
 //!
 //! ```
+//! use squiche as quiche;
 //! let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 //! config.set_application_protos(&[b"example-proto"]);
 //!
@@ -80,6 +81,7 @@
 //! a new connection, while [`accept()`] is for servers:
 //!
 //! ```
+//! use squiche as quiche;
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 //! # let server_name = "quic.tech";
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
@@ -110,6 +112,7 @@
 //! incoming packets that belong to that connection from the network:
 //!
 //! ```no_run
+//! use squiche as quiche;
 //! # let mut buf = [0; 512];
 //! # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -151,6 +154,7 @@
 //! instead:
 //!
 //! ```no_run
+//! use squiche as quiche;
 //! # let mut out = [0; 512];
 //! # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -187,6 +191,7 @@
 //! obtained using the connection's [`timeout()`] method.
 //!
 //! ```
+//! use squiche as quiche;
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
 //! # let peer = "127.0.0.1:1234".parse().unwrap();
@@ -202,6 +207,7 @@
 //! after which additional packets might need to be sent on the network:
 //!
 //! ```no_run
+//! use squiche as quiche;
 //! # let mut out = [0; 512];
 //! # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -260,6 +266,7 @@
 //! Data can be sent on a stream by using the [`stream_send()`] method:
 //!
 //! ```no_run
+//! use squiche as quiche;
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
 //! # let peer = "127.0.0.1:1234".parse().unwrap();
@@ -280,6 +287,7 @@
 //! data from the readable stream:
 //!
 //! ```no_run
+//! use squiche as quiche;
 //! # let mut buf = [0; 512];
 //! # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 //! # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
@@ -337,6 +345,7 @@
 //! For example:
 //!
 //! ```
+//! use squiche as quiche;
 //! let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! config.set_cc_algorithm(quiche::CongestionControlAlgorithm::Reno);
 //! ```
@@ -345,6 +354,7 @@
 //! by its name.
 //!
 //! ```
+//! use squiche as quiche;
 //! let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
 //! config.set_cc_algorithm_name("reno").unwrap();
 //! ```
@@ -639,6 +649,7 @@ impl Config {
     /// ## Examples:
     ///
     /// ```
+    /// use squiche as quiche;
     /// let config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
     /// # Ok::<(), quiche::Error>(())
     /// ```
@@ -715,6 +726,7 @@ impl Config {
     /// ## Examples:
     ///
     /// ```no_run
+    /// use squiche as quiche;
     /// # let mut config = quiche::Config::new(0xbabababa)?;
     /// config.load_cert_chain_from_pem_file("/path/to/cert.pem")?;
     /// # Ok::<(), quiche::Error>(())
@@ -730,6 +742,7 @@ impl Config {
     /// ## Examples:
     ///
     /// ```no_run
+    /// use squiche as quiche;
     /// # let mut config = quiche::Config::new(0xbabababa)?;
     /// config.load_priv_key_from_pem_file("/path/to/key.pem")?;
     /// # Ok::<(), quiche::Error>(())
@@ -746,6 +759,7 @@ impl Config {
     /// ## Examples:
     ///
     /// ```no_run
+    /// use squiche as quiche;
     /// # let mut config = quiche::Config::new(0xbabababa)?;
     /// config.load_verify_locations_from_file("/path/to/cert.pem")?;
     /// # Ok::<(), quiche::Error>(())
@@ -762,6 +776,7 @@ impl Config {
     /// ## Examples:
     ///
     /// ```no_run
+    /// use squiche as quiche;
     /// # let mut config = quiche::Config::new(0xbabababa)?;
     /// config.load_verify_locations_from_directory("/path/to/certs")?;
     /// # Ok::<(), quiche::Error>(())
@@ -858,6 +873,7 @@ impl Config {
     /// ## Examples:
     ///
     /// ```
+    /// use squiche as quiche;
     /// # let mut config = quiche::Config::new(0xbabababa)?;
     /// config.set_application_protos(&[b"http/1.1", b"http/0.9"]);
     /// # Ok::<(), quiche::Error>(())
@@ -883,6 +899,7 @@ impl Config {
     /// ## Examples:
     ///
     /// ```
+    /// # use squiche as quiche;
     /// # let mut config = quiche::Config::new(0xbabababa)?;
     /// config.set_application_protos_wire_format(b"\x08http/1.1\x08http/0.9")?;
     /// # Ok::<(), quiche::Error>(())
@@ -1125,6 +1142,7 @@ impl Config {
     /// ## Examples:
     ///
     /// ```
+    /// # use squiche as quiche;
     /// # let mut config = quiche::Config::new(0xbabababa)?;
     /// config.set_cc_algorithm_name("reno");
     /// # Ok::<(), quiche::Error>(())
@@ -1625,6 +1643,7 @@ where
 /// ## Examples:
 ///
 /// ```no_run
+/// # use squiche as quiche;
 /// # let mut config = quiche::Config::new(0xbabababa)?;
 /// # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
 /// # let local = "127.0.0.1:0".parse().unwrap();
@@ -1703,6 +1722,7 @@ pub fn accept_with_retry<F: BufFactory>(
 /// ## Examples:
 ///
 /// ```no_run
+/// # use squiche as quiche;
 /// # let mut config = quiche::Config::new(0xbabababa)?;
 /// # let server_name = "quic.tech";
 /// # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
@@ -1805,6 +1825,7 @@ pub fn connect_with_dcid_and_buffer_factory<F: BufFactory>(
 /// ## Examples:
 ///
 /// ```no_run
+/// # use squiche as quiche;
 /// # let mut buf = [0; 512];
 /// # let mut out = [0; 512];
 /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -1844,6 +1865,7 @@ pub fn negotiate_version(
 /// ## Examples:
 ///
 /// ```no_run
+/// # use squiche as quiche;
 /// # let mut config = quiche::Config::new(0xbabababa)?;
 /// # let mut buf = [0; 512];
 /// # let mut out = [0; 512];
@@ -2813,6 +2835,7 @@ impl<F: BufFactory> Connection<F> {
     /// ## Examples:
     ///
     /// ```no_run
+    /// # use squiche as quiche;
     /// # let mut buf = [0; 512];
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -3862,6 +3885,7 @@ impl<F: BufFactory> Connection<F> {
     /// ## Examples:
     ///
     /// ```no_run
+    /// # use squiche as quiche;
     /// # let mut out = [0; 512];
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -3949,6 +3973,7 @@ impl<F: BufFactory> Connection<F> {
     /// ## Examples:
     ///
     /// ```no_run
+    /// # use squiche as quiche;
     /// # let mut out = [0; 512];
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -5666,6 +5691,7 @@ impl<F: BufFactory> Connection<F> {
     /// ## Examples:
     ///
     /// ```no_run
+    /// # use squiche as quiche;
     /// # let mut buf = [0; 512];
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -5710,6 +5736,7 @@ impl<F: BufFactory> Connection<F> {
     /// ## Examples:
     ///
     /// ```no_run
+    /// # use squiche as quiche;
     /// # use bytes::BufMut as _;
     /// # let mut buf = Vec::new().limit(1024);  // Read at most 1024 bytes
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -5748,6 +5775,7 @@ impl<F: BufFactory> Connection<F> {
     /// ## Examples:
     ///
     /// ```no_run
+    /// # use squiche as quiche;
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
     /// # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
@@ -5919,6 +5947,7 @@ impl<F: BufFactory> Connection<F> {
     /// ## Examples:
     ///
     /// ```no_run
+    /// # use squiche as quiche;
     /// # let mut buf = [0; 512];
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -6603,6 +6632,7 @@ impl<F: BufFactory> Connection<F> {
     /// ## Examples:
     ///
     /// ```no_run
+    /// # use squiche as quiche;
     /// # let mut buf = [0; 512];
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -6645,6 +6675,7 @@ impl<F: BufFactory> Connection<F> {
     /// ## Examples:
     ///
     /// ```no_run
+    /// # use squiche as quiche;
     /// # let mut buf = [0; 512];
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -6761,6 +6792,7 @@ impl<F: BufFactory> Connection<F> {
     /// ## Examples:
     ///
     /// ```no_run
+    /// # use squiche as quiche;
     /// # let mut buf = [0; 512];
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -6884,6 +6916,7 @@ impl<F: BufFactory> Connection<F> {
     /// ## Examples:
     ///
     /// ```no_run
+    /// # use squiche as quiche;
     /// # let mut buf = [0; 512];
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -6934,6 +6967,7 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// ## Examples:
     /// ```no_run
+    /// # use squiche as quiche;
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
     /// # let scid = quiche::ConnectionId::from_ref(&[0xba; 16]);
@@ -6957,6 +6991,7 @@ impl<F: BufFactory> Connection<F> {
     /// ## Examples:
     ///
     /// ```no_run
+    /// # use squiche as quiche;
     /// # let mut buf = [0; 512];
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
@@ -7473,6 +7508,7 @@ impl<F: BufFactory> Connection<F> {
     /// ## Examples:
     ///
     /// ```no_run
+    /// # use squiche as quiche;
     /// # let mut out = [0; 512];
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     /// # let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
