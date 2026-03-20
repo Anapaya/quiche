@@ -9380,7 +9380,7 @@ fn drop_pkt_on_err(
         return e;
     }
 
-    trace!("{trace_id} dropped invalid packet");
+    trace!("{trace_id} dropped invalid packet: {e:?}");
 
     // Ignore other invalid packets that haven't been authenticated to prevent
     // man-in-the-middle and man-on-the-side attacks.
