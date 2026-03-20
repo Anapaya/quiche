@@ -1,6 +1,6 @@
 [package]
 name = "squiche"
-version = "0.24.8-ana.1"
+version = "0.24.8-ana.2"
 description = "🥧 Savoury implementation of the QUIC transport protocol and HTTP/3"
 repository = { workspace = true }
 authors = ["Anapaya", "Alessandro Ghedini <alessandro@ghedini.me>"]
