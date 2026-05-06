@@ -444,6 +444,57 @@ use crate::stream::StreamPriorityKey;
 /// The current QUIC wire version.
 pub const PROTOCOL_VERSION: u32 = PROTOCOL_VERSION_V1;
 
+/// TLS SignatureScheme value for RSA PKCS#1 SHA-1.
+pub const SIGN_RSA_PKCS1_SHA1: u16 = 0x0201;
+
+/// TLS SignatureScheme value for RSA PKCS#1 SHA-256.
+pub const SIGN_RSA_PKCS1_SHA256: u16 = 0x0401;
+
+/// TLS SignatureScheme value for RSA PKCS#1 SHA-384.
+pub const SIGN_RSA_PKCS1_SHA384: u16 = 0x0501;
+
+/// TLS SignatureScheme value for RSA PKCS#1 SHA-512.
+pub const SIGN_RSA_PKCS1_SHA512: u16 = 0x0601;
+
+/// TLS SignatureScheme value for ECDSA SHA-1.
+pub const SIGN_ECDSA_SHA1: u16 = 0x0203;
+
+/// TLS SignatureScheme value for ECDSA SECP256R1 SHA-256.
+pub const SIGN_ECDSA_SECP256R1_SHA256: u16 = 0x0403;
+
+/// TLS SignatureScheme value for ECDSA SECP384R1 SHA-384.
+pub const SIGN_ECDSA_SECP384R1_SHA384: u16 = 0x0503;
+
+/// TLS SignatureScheme value for ECDSA SECP521R1 SHA-512.
+pub const SIGN_ECDSA_SECP521R1_SHA512: u16 = 0x0603;
+
+/// TLS SignatureScheme value for RSA-PSS RSAE SHA-256.
+pub const SIGN_RSA_PSS_RSAE_SHA256: u16 = 0x0804;
+
+/// TLS SignatureScheme value for RSA-PSS RSAE SHA-384.
+pub const SIGN_RSA_PSS_RSAE_SHA384: u16 = 0x0805;
+
+/// TLS SignatureScheme value for RSA-PSS RSAE SHA-512.
+pub const SIGN_RSA_PSS_RSAE_SHA512: u16 = 0x0806;
+
+/// TLS SignatureScheme value for Ed25519.
+pub const SIGN_ED25519: u16 = 0x0807;
+
+/// Default list of signature algorithms accepted for verifying peer
+/// certificates. This matches BoringSSL's `kVerifySignatureAlgorithms`,
+/// see quiche/deps/boringssl/src/ssl/extensions.cc.
+pub const DEFAULT_VERIFY_ALGORITHM_PREFS: &[u16] = &[
+    SIGN_ECDSA_SECP256R1_SHA256,
+    SIGN_RSA_PSS_RSAE_SHA256,
+    SIGN_RSA_PKCS1_SHA256,
+    SIGN_ECDSA_SECP384R1_SHA384,
+    SIGN_RSA_PSS_RSAE_SHA384,
+    SIGN_RSA_PKCS1_SHA384,
+    SIGN_RSA_PSS_RSAE_SHA512,
+    SIGN_RSA_PKCS1_SHA512,
+    SIGN_RSA_PKCS1_SHA1,
+];
+
 /// The current SCION QUIC wire version.
 pub const SCION_PROTOCOL_VERSION: u32 = SCION_PROTOCOL_VERSION_V1;
 
@@ -764,6 +815,19 @@ impl Config {
     /// ```
     pub fn load_verify_locations_from_file(&mut self, file: &str) -> Result<()> {
         self.tls_ctx.load_verify_locations_from_file(file)
+    }
+
+    /// Configures the preference list of signature algorithms for verifying
+    /// the peer's certificate.
+    ///
+    /// By default, Ed25519 is not included in the verify signature algorithms.
+    /// To accept Ed25519 certificates, include [`SIGN_ED25519`] (`0x0807`)
+    /// in `prefs`.
+    ///
+    /// The values are IANA TLS SignatureScheme identifiers (e.g., `0x0807`
+    /// for Ed25519, `0x0403` for ECDSA-P256-SHA256).
+    pub fn set_verify_algorithm_prefs(&mut self, prefs: &[u16]) -> Result<()> {
+        self.tls_ctx.set_verify_algorithm_prefs(prefs)
     }
 
     /// Specifies a directory where trusted CA certificates are stored for the
