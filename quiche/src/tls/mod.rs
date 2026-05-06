@@ -166,6 +166,16 @@ impl Context {
         }
     }
 
+    pub fn set_verify_algorithm_prefs(&mut self, prefs: &[u16]) -> Result<()> {
+        map_result(unsafe {
+            SSL_CTX_set_verify_algorithm_prefs(
+                self.as_mut_ptr(),
+                prefs.as_ptr(),
+                prefs.len(),
+            )
+        })
+    }
+
     pub fn load_verify_locations_from_file(&mut self, file: &str) -> Result<()> {
         let file = ffi::CString::new(file).map_err(|_| Error::TlsFail)?;
         map_result(unsafe {
@@ -1092,6 +1102,10 @@ extern "C" {
 
     fn SSL_CTX_load_verify_locations(
         ctx: *mut SSL_CTX, file: *const c_char, path: *const c_char,
+    ) -> c_int;
+
+    fn SSL_CTX_set_verify_algorithm_prefs(
+        ctx: *mut SSL_CTX, prefs: *const u16, num_prefs: usize,
     ) -> c_int;
 
     #[cfg(not(windows))]
