@@ -44,10 +44,11 @@ fn target_dir_path() -> std::path::PathBuf {
 }
 
 fn main() {
-    if cfg!(feature = "boringssl-boring-crate") {
-        println!("cargo:rustc-link-lib=static=ssl");
-        println!("cargo:rustc-link-lib=static=crypto");
-    }
+    // No `cargo:rustc-link-lib` for ssl and crypto here: boring-sys emits both,
+    // together with the `-L` search paths that locate them. Emitting them again
+    // makes this crate ask for archives it cannot point the compiler at, which
+    // cargo papers over by propagating a dependency's search paths to every
+    // dependent, but stricter build systems do not.
 
     // MacOS: Allow cdylib to link with undefined symbols
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
