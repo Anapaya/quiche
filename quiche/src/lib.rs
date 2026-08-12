@@ -851,6 +851,44 @@ impl Config {
         self.tls_ctx.load_verify_locations_from_directory(dir)
     }
 
+    /// Specifies the trusted CA certificates used for the purposes of
+    /// certificate verification, without going through the filesystem.
+    ///
+    /// The content of `pem` is parsed as a bundle of PEM-encoded certificates,
+    /// each of which is added to the certificate store. This is meant for
+    /// platforms where the trust anchors don't live in a file or a directory,
+    /// e.g. Android, where they are held by the system key store.
+    ///
+    /// An error is returned if the bundle is malformed or doesn't hold any
+    /// certificate. Loading the same anchor more than once is not an error.
+    /// As with the file based loader, PEM blocks that don't hold a certificate
+    /// are skipped rather than rejected, so a bundle only needs to hold one
+    /// valid certificate to be accepted.
+    ///
+    /// Trust anchors are added as they are read, so when an error is returned
+    /// the certificates preceding the malformed one have already been added to
+    /// the store. Callers that want to fall back to another source on failure
+    /// should build the [`Config`] from scratch instead of reusing it.
+    ///
+    /// This can be called multiple times, and combined with the file and
+    /// directory based loaders, to accumulate trust anchors from several
+    /// sources.
+    ///
+    /// ## Examples:
+    ///
+    /// ```no_run
+    /// use squiche as quiche;
+    /// # let pem = b"";
+    /// # let mut config = quiche::Config::new(0xbabababa)?;
+    /// config.load_verify_locations_from_memory(pem)?;
+    /// # Ok::<(), quiche::Error>(())
+    /// ```
+    pub fn load_verify_locations_from_memory(
+        &mut self, pem: &[u8],
+    ) -> Result<()> {
+        self.tls_ctx.load_verify_locations_from_memory(pem)
+    }
+
     /// Configures whether to verify the peer's certificate.
     ///
     /// This should usually be `true` for client-side connections and `false`

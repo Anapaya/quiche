@@ -89,7 +89,6 @@ struct X509_VERIFY_PARAM {
 
 #[allow(non_camel_case_types)]
 #[repr(transparent)]
-#[cfg(windows)]
 struct X509_STORE {
     _unused: c_void,
 }
@@ -102,8 +101,13 @@ struct X509_STORE_CTX {
 
 #[allow(non_camel_case_types)]
 #[repr(transparent)]
-#[cfg(windows)]
 struct X509 {
+    _unused: c_void,
+}
+
+#[allow(non_camel_case_types)]
+#[repr(transparent)]
+struct BIO {
     _unused: c_void,
 }
 
@@ -198,6 +202,31 @@ impl Context {
                 path.as_ptr(),
             )
         })
+    }
+
+    pub fn load_verify_locations_from_memory(
+        &mut self, pem: &[u8],
+    ) -> Result<()> {
+        let len = c_int::try_from(pem.len()).map_err(|_| Error::TlsFail)?;
+
+        unsafe {
+            let store = SSL_CTX_get_cert_store(self.as_mut_ptr());
+            if store.is_null() {
+                return Err(Error::TlsFail);
+            }
+
+            // The BIO only borrows the buffer, so it must not outlive `pem`.
+            let bio = BIO_new_mem_buf(pem.as_ptr() as *const c_void, len);
+            if bio.is_null() {
+                return Err(Error::TlsFail);
+            }
+
+            let rc = add_pem_certs_to_store(bio, store);
+
+            BIO_free(bio);
+
+            rc
+        }
     }
 
     pub fn use_certificate_chain_file(&mut self, file: &str) -> Result<()> {
@@ -1056,6 +1085,68 @@ pub fn map_result_zero_is_success(bssl_result: c_int) -> Result<()> {
     }
 }
 
+/// Reads every PEM-encoded certificate from `bio` and adds it to `store`.
+///
+/// This mirrors what the TLS library itself does when a PEM bundle is loaded
+/// from a file, including skipping over anything that isn't a certificate, and
+/// leaving the certificates read so far in the store when an error is hit part
+/// way through the bundle.
+///
+/// # Safety
+///
+/// `bio` and `store` must be valid pointers.
+unsafe fn add_pem_certs_to_store(
+    bio: *mut BIO, store: *mut X509_STORE,
+) -> Result<()> {
+    let mut count = 0;
+
+    loop {
+        let cert = PEM_read_bio_X509_AUX(
+            bio,
+            ptr::null_mut(),
+            ptr::null(),
+            ptr::null_mut(),
+        );
+
+        if cert.is_null() {
+            // Running out of PEM blocks is reported as a "no start line"
+            // error, anything else means the bundle is malformed.
+            let eof = err_is_pem_no_start_line(ERR_peek_last_error());
+
+            if !eof {
+                // Surface why the bundle was rejected, as the caller only
+                // gets an opaque error back.
+                log_ssl_error();
+
+                ERR_clear_error();
+
+                return Err(Error::TlsFail);
+            }
+
+            ERR_clear_error();
+
+            break;
+        }
+
+        // The store takes its own reference to the certificate.
+        let rc = X509_STORE_add_cert(store, cert);
+
+        X509_free(cert);
+
+        map_result(rc)?;
+
+        count += 1;
+    }
+
+    // A bundle without a single certificate in it is not a usable set of trust
+    // anchors, and would silently accept nothing.
+    if count == 0 {
+        return Err(Error::TlsFail);
+    }
+
+    Ok(())
+}
+
 pub fn map_result_ptr<'a, T>(bssl_result: *const T) -> Result<&'a T> {
     match unsafe { bssl_result.as_ref() } {
         Some(v) => Ok(v),
@@ -1111,7 +1202,6 @@ extern "C" {
     #[cfg(not(windows))]
     fn SSL_CTX_set_default_verify_paths(ctx: *mut SSL_CTX) -> c_int;
 
-    #[cfg(windows)]
     fn SSL_CTX_get_cert_store(ctx: *mut SSL_CTX) -> *mut X509_STORE;
 
     fn SSL_CTX_set_verify(
@@ -1232,17 +1322,33 @@ extern "C" {
     ) -> c_int;
 
     // X509_STORE
-    #[cfg(windows)]
     fn X509_STORE_add_cert(ctx: *mut X509_STORE, x: *mut X509) -> c_int;
 
     // X509
-    #[cfg(windows)]
     fn X509_free(x: *mut X509);
     #[cfg(windows)]
     fn d2i_X509(px: *mut X509, input: *const *const u8, len: c_int) -> *mut X509;
 
+    // BIO
+    //
+    // Recent BoringSSL takes the length as an `ossl_ssize_t`, while the FIPS
+    // branch still takes an `int`. `c_int` works with both, as long as the
+    // length is clamped to what it can hold before the call.
+    fn BIO_new_mem_buf(buf: *const c_void, len: c_int) -> *mut BIO;
+
+    fn BIO_free(bio: *mut BIO) -> c_int;
+
+    // PEM
+    fn PEM_read_bio_X509_AUX(
+        bio: *mut BIO, x: *mut *mut X509, cb: *const c_void, u: *mut c_void,
+    ) -> *mut X509;
+
     // ERR
     fn ERR_peek_error() -> c_uint;
+
+    fn ERR_peek_last_error() -> c_uint;
+
+    fn ERR_clear_error();
 
     fn ERR_error_string_n(err: c_uint, buf: *mut c_char, len: usize);
 

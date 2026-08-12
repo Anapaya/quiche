@@ -168,6 +168,14 @@ int quiche_config_load_verify_locations_from_file(quiche_config *config,
 int quiche_config_load_verify_locations_from_directory(quiche_config *config,
                                                        const char *path);
 
+// Specifies a PEM bundle of trusted CA certificates, held in memory, for the purposes of certificate verification.
+//
+// On failure the certificates preceding the malformed one have already been added to the store, so the config should
+// be discarded rather than reused.
+int quiche_config_load_verify_locations_from_memory(quiche_config *config,
+                                                    const uint8_t *pem,
+                                                    size_t pem_len);
+
 // Configures whether to verify the peer's certificate.
 void quiche_config_verify_peer(quiche_config *config, bool v);
 

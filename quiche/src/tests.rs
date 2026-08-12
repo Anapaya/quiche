@@ -283,6 +283,128 @@ fn verify_custom_root() {
 }
 
 #[test]
+fn verify_custom_root_from_memory() {
+    let rootca = std::fs::read("examples/rootca.crt").unwrap();
+
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config.verify_peer(true);
+    config.load_verify_locations_from_memory(&rootca).unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+}
+
+#[test]
+fn verify_custom_root_from_memory_bundle() {
+    // The root the server's chain leads to is not the first anchor of the
+    // bundle, so the handshake only succeeds if every certificate in the
+    // bundle was loaded.
+    let mut bundle = std::fs::read("examples/cert.crt").unwrap();
+    bundle.extend_from_slice(&std::fs::read("examples/rootca.crt").unwrap());
+
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config.verify_peer(true);
+    config.load_verify_locations_from_memory(&bundle).unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+}
+
+#[test]
+fn load_verify_locations_from_memory_duplicates() {
+    // Trust stores can hand out the same anchor more than once, which
+    // shouldn't be treated as an error. `cert-big.crt` holds five copies of
+    // the same certificate.
+    let bundle = std::fs::read("examples/cert-big.crt").unwrap();
+
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    assert_eq!(config.load_verify_locations_from_memory(&bundle), Ok(()));
+
+    // Loading the same bundle again is fine too.
+    assert_eq!(config.load_verify_locations_from_memory(&bundle), Ok(()));
+}
+
+#[test]
+fn load_verify_locations_from_memory_invalid() {
+    let rootca = std::fs::read("examples/rootca.crt").unwrap();
+
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+
+    // Empty bundle.
+    assert_eq!(
+        config.load_verify_locations_from_memory(b""),
+        Err(Error::TlsFail)
+    );
+
+    // No PEM block at all.
+    assert_eq!(
+        config.load_verify_locations_from_memory(b"definitely not a PEM file"),
+        Err(Error::TlsFail)
+    );
+
+    // PEM markers around a body that isn't a certificate.
+    assert_eq!(
+        config.load_verify_locations_from_memory(
+            b"-----BEGIN CERTIFICATE-----\naGVsbG8=\n-----END CERTIFICATE-----\n"
+        ),
+        Err(Error::TlsFail)
+    );
+
+    // Truncated certificate.
+    assert_eq!(
+        config.load_verify_locations_from_memory(&rootca[..rootca.len() / 2]),
+        Err(Error::TlsFail)
+    );
+
+    // A valid certificate followed by a malformed one.
+    let mut bundle = rootca.clone();
+    bundle.extend_from_slice(
+        b"-----BEGIN CERTIFICATE-----\naGVsbG8=\n-----END CERTIFICATE-----\n",
+    );
+    assert_eq!(
+        config.load_verify_locations_from_memory(&bundle),
+        Err(Error::TlsFail)
+    );
+
+    // A truncated certificate at the end of an otherwise valid bundle is
+    // caught too, rather than being taken for the end of the bundle.
+    let mut bundle = rootca.clone();
+    bundle.extend_from_slice(&rootca[..rootca.len() / 2]);
+    assert_eq!(
+        config.load_verify_locations_from_memory(&bundle),
+        Err(Error::TlsFail)
+    );
+}
+
+#[test]
+fn load_verify_locations_from_memory_skips_non_certificates() {
+    // Anything that isn't a certificate is skipped, the same way the file
+    // based loader does it, so a bundle is only rejected when it holds no
+    // certificate at all.
+    let rootca = std::fs::read("examples/rootca.crt").unwrap();
+
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+
+    // Trailing content that isn't a PEM block.
+    let mut bundle = rootca.clone();
+    bundle.extend_from_slice(b"\nnot a PEM block at all\n");
+    assert_eq!(config.load_verify_locations_from_memory(&bundle), Ok(()));
+
+    // A PEM block that isn't a certificate.
+    let mut bundle = rootca.clone();
+    bundle.extend_from_slice(
+        b"-----BEGIN RSA PRIVATE KEY-----\naGVsbG8=\n-----END RSA PRIVATE KEY-----\n",
+    );
+    assert_eq!(config.load_verify_locations_from_memory(&bundle), Ok(()));
+}
+
+#[test]
 fn verify_client_invalid() {
     let mut server_config = Config::new(PROTOCOL_VERSION).unwrap();
     server_config
