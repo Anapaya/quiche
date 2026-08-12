@@ -9,12 +9,6 @@ struct OPENSSL_STACK {
     _unused: c_void,
 }
 
-#[allow(non_camel_case_types)]
-#[repr(transparent)]
-struct X509 {
-    _unused: c_void,
-}
-
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub(super) struct SSL_QUIC_METHOD {
@@ -321,6 +315,35 @@ pub(super) fn get_session_bytes(session: *mut SSL_SESSION) -> Result<Vec<u8>> {
     Ok(session_bytes)
 }
 pub(super) const TLS_ERROR: c_int = 2;
+
+/// Extracts the reason code out of a packed error, like `ERR_GET_REASON` does.
+///
+/// Only the reason is looked at, and not the library code, because the two are
+/// packed differently by OpenSSL 1.1.1 and 3.x while the reason itself always
+/// sits in the low bits.
+fn err_get_reason(packed_error: c_uint) -> c_uint {
+    packed_error & 0xfff
+}
+
+/// Returns whether `packed_error` reports that no PEM block was found, which
+/// is how the end of a PEM bundle is signalled.
+pub(super) fn err_is_pem_no_start_line(packed_error: c_uint) -> bool {
+    // From OpenSSL's `pemerr.h`. Note that the reason code differs from
+    // BoringSSL's.
+    const PEM_R_NO_START_LINE: c_uint = 108;
+
+    err_get_reason(packed_error) == PEM_R_NO_START_LINE
+}
+
+/// Returns whether `packed_error` reports that the certificate was already in
+/// the store.
+pub(super) fn err_is_cert_already_in_store(packed_error: c_uint) -> bool {
+    // From OpenSSL's `x509err.h`. Note that the reason code differs from
+    // BoringSSL's.
+    const X509_R_CERT_ALREADY_IN_HASH_TABLE: c_uint = 101;
+
+    err_get_reason(packed_error) == X509_R_CERT_ALREADY_IN_HASH_TABLE
+}
 
 extern "C" {
 

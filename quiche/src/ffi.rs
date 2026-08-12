@@ -201,6 +201,19 @@ pub extern "C" fn quiche_config_load_verify_locations_from_directory(
 }
 
 #[no_mangle]
+pub extern "C" fn quiche_config_load_verify_locations_from_memory(
+    config: &mut Config, pem: *const u8, pem_len: size_t,
+) -> c_int {
+    let pem = unsafe { slice::from_raw_parts(pem, pem_len) };
+
+    match config.load_verify_locations_from_memory(pem) {
+        Ok(_) => 0,
+
+        Err(e) => e.to_c() as c_int,
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn quiche_config_verify_peer(config: &mut Config, v: bool) {
     config.verify_peer(v);
 }

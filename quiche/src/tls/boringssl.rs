@@ -299,6 +299,40 @@ pub(super) fn get_session_bytes(session: *mut SSL_SESSION) -> Result<Vec<u8>> {
 }
 pub(super) const TLS_ERROR: c_int = 3;
 
+/// Extracts the library code out of a packed error, like `ERR_GET_LIB` does.
+fn err_get_lib(packed_error: c_uint) -> c_uint {
+    (packed_error >> 24) & 0xff
+}
+
+/// Extracts the reason code out of a packed error, like `ERR_GET_REASON` does.
+fn err_get_reason(packed_error: c_uint) -> c_uint {
+    packed_error & 0xfff
+}
+
+/// Returns whether `packed_error` reports that no PEM block was found, which
+/// is how the end of a PEM bundle is signalled.
+pub(super) fn err_is_pem_no_start_line(packed_error: c_uint) -> bool {
+    // From BoringSSL's `err.h` and `pem.h`. Note that the reason code differs
+    // from OpenSSL's.
+    const ERR_LIB_PEM: c_uint = 9;
+    const PEM_R_NO_START_LINE: c_uint = 110;
+
+    err_get_lib(packed_error) == ERR_LIB_PEM &&
+        err_get_reason(packed_error) == PEM_R_NO_START_LINE
+}
+
+/// Returns whether `packed_error` reports that the certificate was already in
+/// the store.
+pub(super) fn err_is_cert_already_in_store(packed_error: c_uint) -> bool {
+    // From BoringSSL's `err.h` and `x509.h`. Note that the reason code differs
+    // from OpenSSL's.
+    const ERR_LIB_X509: c_uint = 11;
+    const X509_R_CERT_ALREADY_IN_HASH_TABLE: c_uint = 105;
+
+    err_get_lib(packed_error) == ERR_LIB_X509 &&
+        err_get_reason(packed_error) == X509_R_CERT_ALREADY_IN_HASH_TABLE
+}
+
 #[allow(non_camel_case_types)]
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
