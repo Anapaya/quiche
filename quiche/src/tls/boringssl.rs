@@ -299,6 +299,18 @@ pub(super) fn get_session_bytes(session: *mut SSL_SESSION) -> Result<Vec<u8>> {
 }
 pub(super) const TLS_ERROR: c_int = 3;
 
+/// Returns whether `packed_error` reports that no PEM block was found, which
+/// is how the end of a PEM bundle is signalled.
+pub(super) fn err_is_pem_no_start_line(packed_error: c_uint) -> bool {
+    // Codes and packing from BoringSSL's `err.h` and `pem.h`, matching what
+    // the `ERR_GET_LIB` and `ERR_GET_REASON` inline functions do.
+    const ERR_LIB_PEM: c_uint = 9;
+    const PEM_R_NO_START_LINE: c_uint = 110;
+
+    ((packed_error >> 24) & 0xff) == ERR_LIB_PEM &&
+        (packed_error & 0xfff) == PEM_R_NO_START_LINE
+}
+
 #[allow(non_camel_case_types)]
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
