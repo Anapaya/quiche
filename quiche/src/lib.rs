@@ -999,10 +999,11 @@ impl Config {
     /// [`verify_peer()`] is `false`, which makes any rejection non-fatal.
     ///
     /// Calling this more than once keeps the last verifier. The call is safe
-    /// while connections created from this [`Config`] are handshaking: a
-    /// handshake that is already running keeps the verifier it started with,
-    /// and every later handshake uses the new one. A verifier cannot be
-    /// removed again.
+    /// while connections created from this [`Config`] are handshaking. A call
+    /// to the verifier that is already running finishes with the verifier it
+    /// started with. Every call that starts later uses the new verifier, a
+    /// call from a handshake that was already in progress included. A verifier
+    /// cannot be removed again.
     ///
     /// ## Examples:
     ///

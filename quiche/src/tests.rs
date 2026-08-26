@@ -911,8 +911,19 @@ fn certificate_verifier_replaced_while_handshaking() {
         .map(|mut pipe| std::thread::spawn(move || pipe.handshake()))
         .collect();
 
-    // Wait until every connection is inside the verifier.
+    // Wait until every connection is inside the verifier. The deadline turns a
+    // handshake that fails before it gets there into a failure rather than a
+    // test suite that hangs.
+    let deadline = Instant::now() + Duration::from_secs(10);
+
     while inside.load(Ordering::SeqCst) < CONNECTIONS {
+        assert!(
+            Instant::now() < deadline,
+            "only {} of {} connections reached the verifier",
+            inside.load(Ordering::SeqCst),
+            CONNECTIONS
+        );
+
         std::thread::sleep(Duration::from_millis(1));
     }
 

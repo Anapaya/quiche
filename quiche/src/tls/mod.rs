@@ -1058,6 +1058,10 @@ extern "C" fn custom_verify(
     let verdict =
         catch_unwind(AssertUnwindSafe(|| verifier(&chain, server_name)));
 
+    // This can hold the last reference to a verifier that was replaced while
+    // the call ran, in which case dropping it runs the caller's code too.
+    drop_guarded(verifier);
+
     match verdict {
         Ok(CertificateVerdict::Trusted) => ssl_verify_result_t::ssl_verify_ok,
 
@@ -1083,11 +1087,15 @@ extern "C" fn free_verifier(
         return;
     }
 
-    // The verifier is the caller's, so its drop can panic, and this frame sits
-    // below C.
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        drop(unsafe { Box::from_raw(ptr as *mut VerifierSlot) });
-    }));
+    drop_guarded(unsafe { Box::from_raw(ptr as *mut VerifierSlot) });
+}
+
+/// Drops a value without letting a panicking drop escape the caller's frame.
+///
+/// A verifier is the caller's own code, so dropping one runs code that can
+/// panic, and every frame that drops one sits below the TLS library.
+fn drop_guarded<T>(value: T) {
+    let _ = catch_unwind(AssertUnwindSafe(move || drop(value)));
 }
 
 /// Returns the certificate verifier installed on the context that `ptr`
