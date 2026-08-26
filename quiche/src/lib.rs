@@ -639,6 +639,35 @@ pub enum QlogLevel {
     Extra = 2,
 }
 
+/// The verdict of a [`CertificateVerifier`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CertificateVerdict {
+    /// The peer's certificate chain is trusted, and the handshake continues.
+    Trusted,
+
+    /// The peer's certificate chain is not trusted. The handshake fails, and
+    /// the peer receives a `certificate_unknown` alert.
+    Untrusted,
+}
+
+/// A callback that decides whether the peer's certificate chain is trusted.
+///
+/// The first argument holds the certificates the peer sent, in the order it
+/// sent them: the leaf certificate first, then the certificates that chain up
+/// from it. Each entry is a DER-encoded X.509 certificate, and the slice is
+/// never empty.
+///
+/// The second argument holds the name of the server. On a client this is the
+/// name passed to [`connect()`], and on a server it is the name the client
+/// sent in the TLS SNI extension. It is `None` when no name was sent.
+///
+/// The callback runs on the thread that drives the handshake, and several
+/// connections can run it at the same time.
+///
+/// [`connect()`]: fn.connect.html
+pub type CertificateVerifier =
+    dyn Fn(&[&[u8]], Option<&str>) -> CertificateVerdict + Send + Sync;
+
 /// Stores configuration shared between multiple connections.
 
 pub struct Config {
@@ -807,6 +836,10 @@ impl Config {
     ///
     /// The content of `file` is parsed as a PEM-encoded certificate chain.
     ///
+    /// A verifier set with [`set_certificate_verifier()`] replaces the
+    /// built-in verification. Such a verifier never reads these trust
+    /// anchors.
+    ///
     /// ## Examples:
     ///
     /// ```no_run
@@ -815,6 +848,8 @@ impl Config {
     /// config.load_verify_locations_from_file("/path/to/cert.pem")?;
     /// # Ok::<(), quiche::Error>(())
     /// ```
+    ///
+    /// [`set_certificate_verifier()`]: struct.Config.html#method.set_certificate_verifier
     pub fn load_verify_locations_from_file(&mut self, file: &str) -> Result<()> {
         self.tls_ctx.load_verify_locations_from_file(file)
     }
@@ -837,6 +872,10 @@ impl Config {
     ///
     /// The content of `dir` a set of PEM-encoded certificate chains.
     ///
+    /// A verifier set with [`set_certificate_verifier()`] replaces the
+    /// built-in verification. Such a verifier never reads these trust
+    /// anchors.
+    ///
     /// ## Examples:
     ///
     /// ```no_run
@@ -845,6 +884,8 @@ impl Config {
     /// config.load_verify_locations_from_directory("/path/to/certs")?;
     /// # Ok::<(), quiche::Error>(())
     /// ```
+    ///
+    /// [`set_certificate_verifier()`]: struct.Config.html#method.set_certificate_verifier
     pub fn load_verify_locations_from_directory(
         &mut self, dir: &str,
     ) -> Result<()> {
@@ -874,6 +915,10 @@ impl Config {
     /// directory based loaders, to accumulate trust anchors from several
     /// sources.
     ///
+    /// A verifier set with [`set_certificate_verifier()`] replaces the
+    /// built-in verification. Such a verifier never reads these trust
+    /// anchors.
+    ///
     /// ## Examples:
     ///
     /// ```no_run
@@ -883,6 +928,8 @@ impl Config {
     /// config.load_verify_locations_from_memory(pem)?;
     /// # Ok::<(), quiche::Error>(())
     /// ```
+    ///
+    /// [`set_certificate_verifier()`]: struct.Config.html#method.set_certificate_verifier
     pub fn load_verify_locations_from_memory(
         &mut self, pem: &[u8],
     ) -> Result<()> {
@@ -903,9 +950,70 @@ impl Config {
     /// client presented a certificate by calling [`peer_cert()`] if they
     /// need to.
     ///
+    /// This applies to a verifier set with [`set_certificate_verifier()`] as
+    /// well: the verifier still runs, but a `false` value makes its verdict
+    /// non-fatal.
+    ///
     /// [`peer_cert()`]: struct.Connection.html#method.peer_cert
+    /// [`set_certificate_verifier()`]: struct.Config.html#method.set_certificate_verifier
     pub fn verify_peer(&mut self, verify: bool) {
         self.tls_ctx.set_verify(verify);
+    }
+
+    /// Configures a callback that verifies the peer's certificate chain.
+    ///
+    /// The callback replaces the built-in verification, so the trust anchors
+    /// loaded by [`load_verify_locations_from_file()`],
+    /// [`load_verify_locations_from_directory()`] and
+    /// [`load_verify_locations_from_memory()`] are not consulted while a
+    /// verifier is set, whether they were loaded before or after this call.
+    /// The callback replaces the name check too, so a verifier that
+    /// authenticates a server has to compare the name it is given against the
+    /// certificate itself.
+    ///
+    /// This is meant for platforms that cannot hand out their trust anchors,
+    /// e.g. iOS, where an application can only ask the system to evaluate a
+    /// chain. It is also the way to reach a trust decision that a set of
+    /// anchors cannot express, such as certificate pinning.
+    ///
+    /// The callback only decides whether the handshake fails when
+    /// [`verify_peer()`] is `true`. It runs either way, so a verifier must
+    /// not rely on being called only when its verdict counts.
+    ///
+    /// A panic in the callback is caught, and is reported to the peer as an
+    /// `internal_error` alert.
+    ///
+    /// Calling this more than once keeps the last verifier and drops the
+    /// previous one. A verifier cannot be removed again.
+    ///
+    /// ## Examples:
+    ///
+    /// ```no_run
+    /// use squiche as quiche;
+    /// # let mut config = quiche::Config::new(0xbabababa)?;
+    /// config.verify_peer(true);
+    /// config.set_certificate_verifier(|chain, server_name| {
+    ///     match my_platform_verifier(chain, server_name) {
+    ///         true => quiche::CertificateVerdict::Trusted,
+    ///         false => quiche::CertificateVerdict::Untrusted,
+    ///     }
+    /// })?;
+    /// # fn my_platform_verifier(_: &[&[u8]], _: Option<&str>) -> bool { true }
+    /// # Ok::<(), quiche::Error>(())
+    /// ```
+    ///
+    /// [`load_verify_locations_from_file()`]: struct.Config.html#method.load_verify_locations_from_file
+    /// [`load_verify_locations_from_directory()`]: struct.Config.html#method.load_verify_locations_from_directory
+    /// [`load_verify_locations_from_memory()`]: struct.Config.html#method.load_verify_locations_from_memory
+    /// [`verify_peer()`]: struct.Config.html#method.verify_peer
+    pub fn set_certificate_verifier<F>(&mut self, verifier: F) -> Result<()>
+    where
+        F: Fn(&[&[u8]], Option<&str>) -> CertificateVerdict
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.tls_ctx.set_certificate_verifier(Box::new(verifier))
     }
 
     /// Configures whether to do path MTU discovery.

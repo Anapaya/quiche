@@ -26,6 +26,8 @@
 
 use std::ffi;
 use std::mem::ManuallyDrop;
+use std::panic::catch_unwind;
+use std::panic::AssertUnwindSafe;
 use std::ptr;
 use std::slice;
 
@@ -35,9 +37,12 @@ use std::sync::LazyLock;
 
 use libc::c_char;
 use libc::c_int;
+use libc::c_long;
 use libc::c_uint;
 use libc::c_void;
 
+use crate::CertificateVerdict;
+use crate::CertificateVerifier;
 use crate::Error;
 use crate::Result;
 
@@ -50,6 +55,9 @@ use crate::packet;
 const TLS1_3_VERSION: u16 = 0x0304;
 const TLS_ALERT_ERROR: u64 = 0x100;
 const INTERNAL_ERROR: u64 = 0x01;
+
+/// The `internal_error` TLS alert, from RFC 8446 section 6.2.
+const TLS_ALERT_INTERNAL_ERROR: u8 = 80;
 
 #[allow(non_camel_case_types)]
 #[repr(transparent)]
@@ -132,7 +140,31 @@ pub static QUICHE_EX_DATA_INDEX: LazyLock<c_int> = LazyLock::new(|| unsafe {
     SSL_get_ex_new_index(0, ptr::null(), ptr::null(), ptr::null(), ptr::null())
 });
 
-pub struct Context(*mut SSL_CTX);
+/// BoringSSL ex_data index for the certificate verifier of a context.
+///
+/// The index owns what is stored under it: `free_verifier` drops the closure
+/// when the context itself is destroyed. A context outlives the [`Context`]
+/// that created it whenever a handshake still holds a reference to it, so the
+/// closure cannot be owned by the [`Context`].
+static VERIFIER_EX_DATA_INDEX: LazyLock<c_int> = LazyLock::new(|| unsafe {
+    SSL_CTX_get_ex_new_index(
+        0,
+        ptr::null(),
+        ptr::null(),
+        ptr::null(),
+        free_verifier as *const c_void,
+    )
+});
+
+pub struct Context {
+    ptr: *mut SSL_CTX,
+
+    /// Whether the peer's certificate is verified, as set by `set_verify`.
+    verify_peer: bool,
+
+    /// Whether a certificate verifier is installed in the context's ex_data.
+    has_verifier: bool,
+}
 
 impl Context {
     // Note: some vendor-specific methods are implemented in the boringssl
@@ -141,7 +173,7 @@ impl Context {
         unsafe {
             let ctx_raw = SSL_CTX_new(TLS_method());
 
-            let mut ctx = Context(ctx_raw);
+            let mut ctx = Context::from_ptr(ctx_raw);
 
             ctx.set_session_callback();
 
@@ -157,10 +189,18 @@ impl Context {
     ) -> Context {
         use foreign_types_shared::ForeignType;
 
-        let mut ctx = Context(ssl_ctx_builder.build().into_ptr() as _);
+        let mut ctx = Context::from_ptr(ssl_ctx_builder.build().into_ptr() as _);
         ctx.set_session_callback();
 
         ctx
+    }
+
+    fn from_ptr(ptr: *mut SSL_CTX) -> Context {
+        Context {
+            ptr,
+            verify_peer: false,
+            has_verifier: false,
+        }
     }
 
     pub fn new_handshake(&mut self) -> Result<Handshake> {
@@ -314,14 +354,69 @@ impl Context {
     }
 
     pub fn set_verify(&mut self, verify: bool) {
+        self.verify_peer = verify;
+
+        self.apply_verify();
+    }
+
+    pub fn set_certificate_verifier(
+        &mut self, verifier: Box<CertificateVerifier>,
+    ) -> Result<()> {
+        let idx = *VERIFIER_EX_DATA_INDEX;
+
+        // The outer box gives the closure a thin pointer to hand to the
+        // context, which takes ownership of it. See `VERIFIER_EX_DATA_INDEX`.
+        let verifier = Box::into_raw(Box::new(verifier));
+
+        unsafe {
+            let previous = SSL_CTX_get_ex_data(self.as_mut_ptr(), idx);
+
+            let rc = SSL_CTX_set_ex_data(
+                self.as_mut_ptr(),
+                idx,
+                verifier as *mut c_void,
+            );
+
+            if let Err(e) = map_result(rc) {
+                // Nothing took ownership of the closure, so drop it again.
+                drop(Box::from_raw(verifier));
+
+                return Err(e);
+            }
+
+            if !previous.is_null() {
+                drop(Box::from_raw(previous as *mut Box<CertificateVerifier>));
+            }
+        }
+
+        self.has_verifier = true;
+
+        self.apply_verify();
+
+        Ok(())
+    }
+
+    /// Tells the TLS library how to verify the peer's certificate.
+    ///
+    /// The mode and the callback are set together, so both have to be applied
+    /// again whenever either of them changes.
+    fn apply_verify(&mut self) {
         // true  -> 0x01 SSL_VERIFY_PEER
         // false -> 0x00 SSL_VERIFY_NONE
-        let mode = i32::from(verify);
+        let mode = c_int::from(self.verify_peer);
 
         // Note: Base on two used modes(see above), it seems ok for both, bssl and
         // ossl. If mode needs to be ored then it may need to be adjusted.
         unsafe {
-            SSL_CTX_set_verify(self.as_mut_ptr(), mode, None);
+            if self.has_verifier {
+                SSL_CTX_set_custom_verify(
+                    self.as_mut_ptr(),
+                    mode,
+                    Some(custom_verify),
+                );
+            } else {
+                SSL_CTX_set_verify(self.as_mut_ptr(), mode, None);
+            }
         }
     }
 
@@ -369,7 +464,7 @@ impl Context {
     }
 
     fn as_mut_ptr(&mut self) -> *mut SSL_CTX {
-        self.0
+        self.ptr
     }
 }
 
@@ -948,6 +1043,76 @@ extern "C" fn send_alert(
     });
 
     1
+}
+
+extern "C" fn custom_verify(
+    ssl: *mut SSL, out_alert: *mut u8,
+) -> ssl_verify_result_t {
+    let verifier = match verifier_from_ssl_ptr(ssl) {
+        Some(v) => v,
+
+        None => return ssl_verify_result_t::ssl_verify_invalid,
+    };
+
+    // This callback receives a borrowed `SSL*`, so the temporary `Handshake`
+    // must not free it on any return path.
+    let handshake = ManuallyDrop::new(Handshake::new(ssl));
+
+    let chain = match handshake.peer_cert_chain() {
+        Some(v) => v,
+
+        None => return ssl_verify_result_t::ssl_verify_invalid,
+    };
+
+    let server_name = handshake.server_name();
+
+    // The TLS library is written in C, so a panic must not unwind past this
+    // frame.
+    let verdict =
+        catch_unwind(AssertUnwindSafe(|| verifier(&chain, server_name)));
+
+    match verdict {
+        Ok(CertificateVerdict::Trusted) => ssl_verify_result_t::ssl_verify_ok,
+
+        Ok(CertificateVerdict::Untrusted) =>
+            ssl_verify_result_t::ssl_verify_invalid,
+
+        Err(_) => {
+            // The verifier reached no verdict, so the fault is ours rather
+            // than the peer's.
+            unsafe { *out_alert = TLS_ALERT_INTERNAL_ERROR };
+
+            ssl_verify_result_t::ssl_verify_invalid
+        },
+    }
+}
+
+/// Drops the certificate verifier of a context that is being destroyed.
+extern "C" fn free_verifier(
+    _parent: *mut c_void, ptr: *mut c_void, _ad: *mut c_void, _index: c_int,
+    _argl: c_long, _argp: *mut c_void,
+) {
+    if ptr.is_null() {
+        return;
+    }
+
+    drop(unsafe { Box::from_raw(ptr as *mut Box<CertificateVerifier>) });
+}
+
+/// Returns the certificate verifier installed on the context that `ptr`
+/// belongs to.
+fn verifier_from_ssl_ptr<'a>(ptr: *const SSL) -> Option<&'a CertificateVerifier> {
+    unsafe {
+        let ctx = SSL_get_SSL_CTX(ptr);
+        if ctx.is_null() {
+            return None;
+        }
+
+        let data = SSL_CTX_get_ex_data(ctx, *VERIFIER_EX_DATA_INDEX)
+            as *const Box<CertificateVerifier>;
+
+        data.as_ref().map(|verifier| &**verifier)
+    }
 }
 
 extern "C" fn keylog(ssl: *const SSL, line: *const c_char) {

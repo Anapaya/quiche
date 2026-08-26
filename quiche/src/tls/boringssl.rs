@@ -315,6 +315,20 @@ pub(super) fn err_is_pem_no_start_line(packed_error: c_uint) -> bool {
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct ssl_early_data_reason_t(pub ::std::os::raw::c_uint);
+
+/// The verdict a custom certificate verification callback returns.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub(super) enum ssl_verify_result_t {
+    ssl_verify_ok,
+    ssl_verify_invalid,
+
+    // Kept so that the discriminants match the TLS library's, even though
+    // quiche's verifiers are synchronous and never ask for a retry.
+    #[allow(dead_code)]
+    ssl_verify_retry,
+}
+
 extern "C" {
     // SSL_METHOD specific for boringssl.
     pub(super) fn SSL_CTX_set_tlsext_ticket_keys(
@@ -329,6 +343,29 @@ extern "C" {
         argl: c_long, argp: *const c_void, unused: *const c_void,
         dup_unused: *const c_void, free_func: *const c_void,
     ) -> c_int;
+
+    pub(super) fn SSL_CTX_get_ex_new_index(
+        argl: c_long, argp: *const c_void, unused: *const c_void,
+        dup_unused: *const c_void, free_func: *const c_void,
+    ) -> c_int;
+
+    pub(super) fn SSL_CTX_set_ex_data(
+        ctx: *mut SSL_CTX, idx: c_int, ptr: *mut c_void,
+    ) -> c_int;
+
+    pub(super) fn SSL_CTX_get_ex_data(
+        ctx: *const SSL_CTX, idx: c_int,
+    ) -> *mut c_void;
+
+    pub(super) fn SSL_CTX_set_custom_verify(
+        ctx: *mut SSL_CTX, mode: c_int,
+        cb: Option<
+            unsafe extern "C" fn(
+                ssl: *mut SSL,
+                out_alert: *mut u8,
+            ) -> ssl_verify_result_t,
+        >,
+    );
 
     fn SSL_get_curve_id(ssl: *const SSL) -> u16;
     fn SSL_get_curve_name(curve: u16) -> *const c_char;
