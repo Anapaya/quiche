@@ -33,7 +33,10 @@ use std::slice;
 
 use std::io::Write;
 
+use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::PoisonError;
+use std::sync::RwLock;
 
 use libc::c_char;
 use libc::c_int;
@@ -140,12 +143,19 @@ pub static QUICHE_EX_DATA_INDEX: LazyLock<c_int> = LazyLock::new(|| unsafe {
     SSL_get_ex_new_index(0, ptr::null(), ptr::null(), ptr::null(), ptr::null())
 });
 
+/// Where a context keeps the certificate verifier it was given.
+///
+/// The lock makes the verifier replaceable while handshakes run: a handshake
+/// clones the [`Arc`] out and releases the lock before it calls the verifier,
+/// so a verifier that is replaced lives on until the last call to it returns.
+type VerifierSlot = RwLock<Arc<CertificateVerifier>>;
+
 /// BoringSSL ex_data index for the certificate verifier of a context.
 ///
-/// The index owns what is stored under it: `free_verifier` drops the closure
-/// when the context itself is destroyed. A context outlives the [`Context`]
-/// that created it whenever a handshake still holds a reference to it, so the
-/// closure cannot be owned by the [`Context`].
+/// The index owns what is stored under it: `free_verifier` drops the slot when
+/// the context itself is destroyed. A context outlives the [`Context`] that
+/// created it whenever a handshake still holds a reference to it, so the slot
+/// cannot be owned by the [`Context`].
 static VERIFIER_EX_DATA_INDEX: LazyLock<c_int> = LazyLock::new(|| unsafe {
     SSL_CTX_get_ex_new_index(
         0,
@@ -156,15 +166,7 @@ static VERIFIER_EX_DATA_INDEX: LazyLock<c_int> = LazyLock::new(|| unsafe {
     )
 });
 
-pub struct Context {
-    ptr: *mut SSL_CTX,
-
-    /// Whether the peer's certificate is verified, as set by `set_verify`.
-    verify_peer: bool,
-
-    /// Whether a certificate verifier is installed in the context's ex_data.
-    has_verifier: bool,
-}
+pub struct Context(*mut SSL_CTX);
 
 impl Context {
     // Note: some vendor-specific methods are implemented in the boringssl
@@ -173,7 +175,7 @@ impl Context {
         unsafe {
             let ctx_raw = SSL_CTX_new(TLS_method());
 
-            let mut ctx = Context::from_ptr(ctx_raw);
+            let mut ctx = Context(ctx_raw);
 
             ctx.set_session_callback();
 
@@ -189,18 +191,10 @@ impl Context {
     ) -> Context {
         use foreign_types_shared::ForeignType;
 
-        let mut ctx = Context::from_ptr(ssl_ctx_builder.build().into_ptr() as _);
+        let mut ctx = Context(ssl_ctx_builder.build().into_ptr() as _);
         ctx.set_session_callback();
 
         ctx
-    }
-
-    fn from_ptr(ptr: *mut SSL_CTX) -> Context {
-        Context {
-            ptr,
-            verify_peer: false,
-            has_verifier: false,
-        }
     }
 
     pub fn new_handshake(&mut self) -> Result<Handshake> {
@@ -354,70 +348,63 @@ impl Context {
     }
 
     pub fn set_verify(&mut self, verify: bool) {
-        self.verify_peer = verify;
+        // true  -> 0x01 SSL_VERIFY_PEER
+        // false -> 0x00 SSL_VERIFY_NONE
+        let mode = i32::from(verify);
 
-        self.apply_verify();
+        // Note: Base on two used modes(see above), it seems ok for both, bssl and
+        // ossl. If mode needs to be ored then it may need to be adjusted.
+        //
+        // This leaves a certificate verifier in place: the TLS library keeps
+        // the custom verification callback apart from the mode.
+        unsafe {
+            SSL_CTX_set_verify(self.as_mut_ptr(), mode, None);
+        }
     }
 
     pub fn set_certificate_verifier(
-        &mut self, verifier: Box<CertificateVerifier>,
+        &mut self, verifier: Arc<CertificateVerifier>,
     ) -> Result<()> {
         let idx = *VERIFIER_EX_DATA_INDEX;
 
-        // The outer box gives the closure a thin pointer to hand to the
-        // context, which takes ownership of it. See `VERIFIER_EX_DATA_INDEX`.
-        let verifier = Box::into_raw(Box::new(verifier));
-
         unsafe {
-            let previous = SSL_CTX_get_ex_data(self.as_mut_ptr(), idx);
+            // Replace the verifier in place when the context already holds a
+            // slot, so that a handshake running right now keeps the verifier
+            // it has already taken out of the slot.
+            let slot = SSL_CTX_get_ex_data(self.as_mut_ptr(), idx);
 
-            let rc = SSL_CTX_set_ex_data(
-                self.as_mut_ptr(),
-                idx,
-                verifier as *mut c_void,
-            );
+            if let Some(slot) = (slot as *const VerifierSlot).as_ref() {
+                *slot.write().unwrap_or_else(PoisonError::into_inner) = verifier;
+
+                return Ok(());
+            }
+
+            // The box gives the slot a thin pointer to hand to the context,
+            // which takes ownership of it. See `VERIFIER_EX_DATA_INDEX`.
+            let slot = Box::into_raw(Box::new(VerifierSlot::new(verifier)));
+
+            let rc =
+                SSL_CTX_set_ex_data(self.as_mut_ptr(), idx, slot as *mut c_void);
 
             if let Err(e) = map_result(rc) {
-                // Nothing took ownership of the closure, so drop it again.
-                drop(Box::from_raw(verifier));
+                // Nothing took ownership of the slot, so drop it again.
+                drop(Box::from_raw(slot));
 
                 return Err(e);
             }
 
-            if !previous.is_null() {
-                drop(Box::from_raw(previous as *mut Box<CertificateVerifier>));
-            }
+            // Keep the verify mode the context already has, whether this crate
+            // or the caller's own builder set it.
+            let mode = SSL_CTX_get_verify_mode(self.as_mut_ptr());
+
+            SSL_CTX_set_custom_verify(
+                self.as_mut_ptr(),
+                mode,
+                Some(custom_verify),
+            );
         }
-
-        self.has_verifier = true;
-
-        self.apply_verify();
 
         Ok(())
-    }
-
-    /// Tells the TLS library how to verify the peer's certificate.
-    ///
-    /// The mode and the callback are set together, so both have to be applied
-    /// again whenever either of them changes.
-    fn apply_verify(&mut self) {
-        // true  -> 0x01 SSL_VERIFY_PEER
-        // false -> 0x00 SSL_VERIFY_NONE
-        let mode = c_int::from(self.verify_peer);
-
-        // Note: Base on two used modes(see above), it seems ok for both, bssl and
-        // ossl. If mode needs to be ored then it may need to be adjusted.
-        unsafe {
-            if self.has_verifier {
-                SSL_CTX_set_custom_verify(
-                    self.as_mut_ptr(),
-                    mode,
-                    Some(custom_verify),
-                );
-            } else {
-                SSL_CTX_set_verify(self.as_mut_ptr(), mode, None);
-            }
-        }
     }
 
     pub fn enable_keylog(&mut self) {
@@ -464,7 +451,7 @@ impl Context {
     }
 
     fn as_mut_ptr(&mut self) -> *mut SSL_CTX {
-        self.ptr
+        self.0
     }
 }
 
@@ -1096,22 +1083,32 @@ extern "C" fn free_verifier(
         return;
     }
 
-    drop(unsafe { Box::from_raw(ptr as *mut Box<CertificateVerifier>) });
+    // The verifier is the caller's, so its drop can panic, and this frame sits
+    // below C.
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        drop(unsafe { Box::from_raw(ptr as *mut VerifierSlot) });
+    }));
 }
 
 /// Returns the certificate verifier installed on the context that `ptr`
 /// belongs to.
-fn verifier_from_ssl_ptr<'a>(ptr: *const SSL) -> Option<&'a CertificateVerifier> {
+fn verifier_from_ssl_ptr(ptr: *const SSL) -> Option<Arc<CertificateVerifier>> {
     unsafe {
         let ctx = SSL_get_SSL_CTX(ptr);
         if ctx.is_null() {
             return None;
         }
 
-        let data = SSL_CTX_get_ex_data(ctx, *VERIFIER_EX_DATA_INDEX)
-            as *const Box<CertificateVerifier>;
+        let slot = SSL_CTX_get_ex_data(ctx, *VERIFIER_EX_DATA_INDEX)
+            as *const VerifierSlot;
 
-        data.as_ref().map(|verifier| &**verifier)
+        let slot = slot.as_ref()?;
+
+        // Take the verifier out of the slot and release the lock, so that a
+        // slow verifier does not block a caller that replaces it.
+        Some(Arc::clone(
+            &slot.read().unwrap_or_else(PoisonError::into_inner),
+        ))
     }
 }
 

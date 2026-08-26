@@ -357,6 +357,8 @@ extern "C" {
         ctx: *const SSL_CTX, idx: c_int,
     ) -> *mut c_void;
 
+    pub(super) fn SSL_CTX_get_verify_mode(ctx: *const SSL_CTX) -> c_int;
+
     pub(super) fn SSL_CTX_set_custom_verify(
         ctx: *mut SSL_CTX, mode: c_int,
         cb: Option<

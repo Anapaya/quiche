@@ -659,7 +659,9 @@ pub enum CertificateVerdict {
 ///
 /// The second argument holds the name of the server. On a client this is the
 /// name passed to [`connect()`], and on a server it is the name the client
-/// sent in the TLS SNI extension. It is `None` when no name was sent.
+/// sent in the TLS SNI extension. It is `None` when no name was sent, and also
+/// when the name that was sent is not valid UTF-8, so a verifier cannot tell
+/// the two apart.
 ///
 /// The callback runs on the thread that drives the handshake, and several
 /// connections can run it at the same time.
@@ -898,7 +900,7 @@ impl Config {
     /// The content of `pem` is parsed as a bundle of PEM-encoded certificates,
     /// each of which is added to the certificate store. This is meant for
     /// platforms where the trust anchors don't live in a file or a directory,
-    /// e.g. Android, where they are held by the system key store.
+    /// e.g. Android, where the system key store holds them.
     ///
     /// An error is returned if the bundle is malformed or doesn't hold any
     /// certificate. Loading the same anchor more than once is not an error.
@@ -971,20 +973,36 @@ impl Config {
     /// authenticates a server has to compare the name it is given against the
     /// certificate itself.
     ///
-    /// This is meant for platforms that cannot hand out their trust anchors,
-    /// e.g. iOS, where an application can only ask the system to evaluate a
-    /// chain. It is also the way to reach a trust decision that a set of
-    /// anchors cannot express, such as certificate pinning.
+    /// This is meant for platforms that do not let an application read their
+    /// trust anchors, e.g. iOS, where an application can only ask the system
+    /// to evaluate a chain. It is also the way to reach a trust decision that
+    /// a set of anchors cannot express, such as certificate pinning.
     ///
     /// The callback only decides whether the handshake fails when
     /// [`verify_peer()`] is `true`. It runs either way, so a verifier must
-    /// not rely on being called only when its verdict counts.
+    /// not rely on being called only when its verdict counts. The order of
+    /// the two calls does not matter.
     ///
-    /// A panic in the callback is caught, and is reported to the peer as an
-    /// `internal_error` alert.
+    /// Set the verifier before the first [`connect()`] or [`accept()`] that
+    /// uses this [`Config`]. A connection created earlier keeps the built-in
+    /// verification, because the TLS library copies the verification callback
+    /// when it creates the connection.
     ///
-    /// Calling this more than once keeps the last verifier and drops the
-    /// previous one. A verifier cannot be removed again.
+    /// The callback does not run when a connection resumes a session, because
+    /// the peer sends no certificate then. This is what the built-in
+    /// verification does as well, so a verifier that pins a certificate only
+    /// sees the handshake that established the session.
+    ///
+    /// A panic in the callback is caught and turns into a rejection. The peer
+    /// then gets an `internal_error` alert instead of the
+    /// `certificate_unknown` alert an ordinary rejection sends, unless
+    /// [`verify_peer()`] is `false`, which makes any rejection non-fatal.
+    ///
+    /// Calling this more than once keeps the last verifier. The call is safe
+    /// while connections created from this [`Config`] are handshaking: a
+    /// handshake that is already running keeps the verifier it started with,
+    /// and every later handshake uses the new one. A verifier cannot be
+    /// removed again.
     ///
     /// ## Examples:
     ///
@@ -1006,6 +1024,8 @@ impl Config {
     /// [`load_verify_locations_from_directory()`]: struct.Config.html#method.load_verify_locations_from_directory
     /// [`load_verify_locations_from_memory()`]: struct.Config.html#method.load_verify_locations_from_memory
     /// [`verify_peer()`]: struct.Config.html#method.verify_peer
+    /// [`connect()`]: fn.connect.html
+    /// [`accept()`]: fn.accept.html
     pub fn set_certificate_verifier<F>(&mut self, verifier: F) -> Result<()>
     where
         F: Fn(&[&[u8]], Option<&str>) -> CertificateVerdict
@@ -1013,7 +1033,7 @@ impl Config {
             + Sync
             + 'static,
     {
-        self.tls_ctx.set_certificate_verifier(Box::new(verifier))
+        self.tls_ctx.set_certificate_verifier(Arc::new(verifier))
     }
 
     /// Configures whether to do path MTU discovery.
