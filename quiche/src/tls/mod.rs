@@ -26,18 +26,26 @@
 
 use std::ffi;
 use std::mem::ManuallyDrop;
+use std::panic::catch_unwind;
+use std::panic::AssertUnwindSafe;
 use std::ptr;
 use std::slice;
 
 use std::io::Write;
 
+use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::PoisonError;
+use std::sync::RwLock;
 
 use libc::c_char;
 use libc::c_int;
+use libc::c_long;
 use libc::c_uint;
 use libc::c_void;
 
+use crate::CertificateVerdict;
+use crate::CertificateVerifier;
 use crate::Error;
 use crate::Result;
 
@@ -50,6 +58,9 @@ use crate::packet;
 const TLS1_3_VERSION: u16 = 0x0304;
 const TLS_ALERT_ERROR: u64 = 0x100;
 const INTERNAL_ERROR: u64 = 0x01;
+
+/// The `internal_error` TLS alert, from RFC 8446 section 6.2.
+const TLS_ALERT_INTERNAL_ERROR: u8 = 80;
 
 #[allow(non_camel_case_types)]
 #[repr(transparent)]
@@ -130,6 +141,29 @@ enum ssl_private_key_result_t {
 /// BoringSSL ex_data index for quiche connections.
 pub static QUICHE_EX_DATA_INDEX: LazyLock<c_int> = LazyLock::new(|| unsafe {
     SSL_get_ex_new_index(0, ptr::null(), ptr::null(), ptr::null(), ptr::null())
+});
+
+/// Where a context keeps the certificate verifier it was given.
+///
+/// The lock makes the verifier replaceable while handshakes run: a handshake
+/// clones the [`Arc`] out and releases the lock before it calls the verifier,
+/// so a verifier that is replaced lives on until the last call to it returns.
+type VerifierSlot = RwLock<Arc<CertificateVerifier>>;
+
+/// BoringSSL ex_data index for the certificate verifier of a context.
+///
+/// The index owns what is stored under it: `free_verifier` drops the slot when
+/// the context itself is destroyed. A context outlives the [`Context`] that
+/// created it whenever a handshake still holds a reference to it, so the slot
+/// cannot be owned by the [`Context`].
+static VERIFIER_EX_DATA_INDEX: LazyLock<c_int> = LazyLock::new(|| unsafe {
+    SSL_CTX_get_ex_new_index(
+        0,
+        ptr::null(),
+        ptr::null(),
+        ptr::null(),
+        free_verifier as *const c_void,
+    )
 });
 
 pub struct Context(*mut SSL_CTX);
@@ -320,9 +354,57 @@ impl Context {
 
         // Note: Base on two used modes(see above), it seems ok for both, bssl and
         // ossl. If mode needs to be ored then it may need to be adjusted.
+        //
+        // This leaves a certificate verifier in place: the TLS library keeps
+        // the custom verification callback apart from the mode.
         unsafe {
             SSL_CTX_set_verify(self.as_mut_ptr(), mode, None);
         }
+    }
+
+    pub fn set_certificate_verifier(
+        &mut self, verifier: Arc<CertificateVerifier>,
+    ) -> Result<()> {
+        let idx = *VERIFIER_EX_DATA_INDEX;
+
+        unsafe {
+            // Replace the verifier in place when the context already holds a
+            // slot, so that a handshake running right now keeps the verifier
+            // it has already taken out of the slot.
+            let slot = SSL_CTX_get_ex_data(self.as_mut_ptr(), idx);
+
+            if let Some(slot) = (slot as *const VerifierSlot).as_ref() {
+                *slot.write().unwrap_or_else(PoisonError::into_inner) = verifier;
+
+                return Ok(());
+            }
+
+            // The box gives the slot a thin pointer to hand to the context,
+            // which takes ownership of it. See `VERIFIER_EX_DATA_INDEX`.
+            let slot = Box::into_raw(Box::new(VerifierSlot::new(verifier)));
+
+            let rc =
+                SSL_CTX_set_ex_data(self.as_mut_ptr(), idx, slot as *mut c_void);
+
+            if let Err(e) = map_result(rc) {
+                // Nothing took ownership of the slot, so drop it again.
+                drop(Box::from_raw(slot));
+
+                return Err(e);
+            }
+
+            // Keep the verify mode the context already has, whether this crate
+            // or the caller's own builder set it.
+            let mode = SSL_CTX_get_verify_mode(self.as_mut_ptr());
+
+            SSL_CTX_set_custom_verify(
+                self.as_mut_ptr(),
+                mode,
+                Some(custom_verify),
+            );
+        }
+
+        Ok(())
     }
 
     pub fn enable_keylog(&mut self) {
@@ -948,6 +1030,94 @@ extern "C" fn send_alert(
     });
 
     1
+}
+
+extern "C" fn custom_verify(
+    ssl: *mut SSL, out_alert: *mut u8,
+) -> ssl_verify_result_t {
+    let verifier = match verifier_from_ssl_ptr(ssl) {
+        Some(v) => v,
+
+        None => return ssl_verify_result_t::ssl_verify_invalid,
+    };
+
+    // This callback receives a borrowed `SSL*`, so the temporary `Handshake`
+    // must not free it on any return path.
+    let handshake = ManuallyDrop::new(Handshake::new(ssl));
+
+    let chain = match handshake.peer_cert_chain() {
+        Some(v) => v,
+
+        None => return ssl_verify_result_t::ssl_verify_invalid,
+    };
+
+    let server_name = handshake.server_name();
+
+    // The TLS library is written in C, so a panic must not unwind past this
+    // frame.
+    let verdict =
+        catch_unwind(AssertUnwindSafe(|| verifier(&chain, server_name)));
+
+    // This can hold the last reference to a verifier that was replaced while
+    // the call ran, in which case dropping it runs the caller's code too.
+    drop_guarded(verifier);
+
+    match verdict {
+        Ok(CertificateVerdict::Trusted) => ssl_verify_result_t::ssl_verify_ok,
+
+        Ok(CertificateVerdict::Untrusted) =>
+            ssl_verify_result_t::ssl_verify_invalid,
+
+        Err(_) => {
+            // The verifier reached no verdict, so the fault is ours rather
+            // than the peer's.
+            unsafe { *out_alert = TLS_ALERT_INTERNAL_ERROR };
+
+            ssl_verify_result_t::ssl_verify_invalid
+        },
+    }
+}
+
+/// Drops the certificate verifier of a context that is being destroyed.
+extern "C" fn free_verifier(
+    _parent: *mut c_void, ptr: *mut c_void, _ad: *mut c_void, _index: c_int,
+    _argl: c_long, _argp: *mut c_void,
+) {
+    if ptr.is_null() {
+        return;
+    }
+
+    drop_guarded(unsafe { Box::from_raw(ptr as *mut VerifierSlot) });
+}
+
+/// Drops a value without letting a panicking drop escape the caller's frame.
+///
+/// A verifier is the caller's own code, so dropping one runs code that can
+/// panic, and every frame that drops one sits below the TLS library.
+fn drop_guarded<T>(value: T) {
+    let _ = catch_unwind(AssertUnwindSafe(move || drop(value)));
+}
+
+/// Returns the certificate verifier installed on the context that `ptr`
+/// belongs to.
+fn verifier_from_ssl_ptr(ptr: *const SSL) -> Option<Arc<CertificateVerifier>> {
+    unsafe {
+        let ctx = SSL_get_SSL_CTX(ptr);
+        if ctx.is_null() {
+            return None;
+        }
+
+        let slot = SSL_CTX_get_ex_data(ctx, *VERIFIER_EX_DATA_INDEX)
+            as *const VerifierSlot;
+
+        let slot = slot.as_ref()?;
+
+        // Take the verifier out of the slot and release the lock, so that a
+        // slow verifier does not block a caller that replaces it.
+        Some(Arc::clone(
+            &slot.read().unwrap_or_else(PoisonError::into_inner),
+        ))
+    }
 }
 
 extern "C" fn keylog(ssl: *const SSL, line: *const c_char) {

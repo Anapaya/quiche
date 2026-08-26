@@ -26,6 +26,11 @@
 
 use super::*;
 
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+
 use crate::range_buf::RangeBuf;
 use crate::test_utils::stream_recv_discard;
 use crate::Header;
@@ -402,6 +407,541 @@ fn load_verify_locations_from_memory_skips_non_certificates() {
         b"-----BEGIN RSA PRIVATE KEY-----\naGVsbG8=\n-----END RSA PRIVATE KEY-----\n",
     );
     assert_eq!(config.load_verify_locations_from_memory(&bundle), Ok(()));
+}
+
+#[test]
+fn verify_with_certificate_verifier() {
+    // No CA file, directory or bundle is configured, so the handshake only
+    // succeeds because the verifier accepts the chain.
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config.verify_peer(true);
+    config
+        .set_certificate_verifier(|_, _| CertificateVerdict::Trusted)
+        .unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+}
+
+#[test]
+fn verify_with_certificate_verifier_rejected() {
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config.verify_peer(true);
+    config
+        .set_certificate_verifier(|_, _| CertificateVerdict::Untrusted)
+        .unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Err(Error::TlsFail));
+
+    // 0x100 + 46, the `certificate_unknown` alert.
+    assert_eq!(pipe.client.local_error().map(|e| e.error_code), Some(0x12e));
+}
+
+#[test]
+fn verify_with_certificate_verifier_observes_chain() {
+    let seen = Arc::new(Mutex::new(None));
+
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config.verify_peer(true);
+    config
+        .set_certificate_verifier({
+            let seen = Arc::clone(&seen);
+
+            move |chain, server_name| {
+                let chain = chain.iter().map(|c| c.to_vec()).collect();
+                *seen.lock().unwrap() =
+                    Some((chain, server_name.map(str::to_string)));
+
+                CertificateVerdict::Trusted
+            }
+        })
+        .unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+
+    let (chain, server_name): (Vec<Vec<u8>>, _) =
+        seen.lock().unwrap().take().unwrap();
+
+    assert_eq!(server_name.as_deref(), Some("quic.tech"));
+
+    // The chain the verifier saw is the one the peer sent, leaf first.
+    assert_eq!(chain.len(), 1);
+    assert_eq!(chain.first().map(Vec::as_slice), pipe.client.peer_cert());
+}
+
+#[test]
+fn verify_with_certificate_verifier_beats_trust_anchors() {
+    // The anchor the chain leads to is loaded, and the verifier still decides.
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config.verify_peer(true);
+    config
+        .load_verify_locations_from_file("examples/rootca.crt")
+        .unwrap();
+    config
+        .set_certificate_verifier(|_, _| CertificateVerdict::Untrusted)
+        .unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Err(Error::TlsFail));
+}
+
+#[test]
+fn verify_with_certificate_verifier_not_enforced() {
+    // Without `verify_peer(true)` the verdict is not fatal, exactly as a
+    // failed built-in check is not.
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config
+        .set_certificate_verifier(|_, _| CertificateVerdict::Untrusted)
+        .unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+}
+
+#[test]
+fn verify_with_certificate_verifier_replaced() {
+    // Only the verifier set last is called.
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config.verify_peer(true);
+    config
+        .set_certificate_verifier(|_, _| CertificateVerdict::Untrusted)
+        .unwrap();
+    config
+        .set_certificate_verifier(|_, _| CertificateVerdict::Trusted)
+        .unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+}
+
+#[test]
+fn verify_with_panicking_certificate_verifier() {
+    // A panic must not unwind into the TLS library. The peer is told that the
+    // fault is ours, with an `internal_error` alert.
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config.verify_peer(true);
+    config
+        .set_certificate_verifier(|_, _| panic!("verifier is broken"))
+        .unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
+
+    let res = {
+        let _quiet = QuietPanics::new();
+
+        pipe.handshake()
+    };
+
+    assert_eq!(res, Err(Error::TlsFail));
+
+    // 0x100 + 80, the `internal_error` alert.
+    assert_eq!(pipe.client.local_error().map(|e| e.error_code), Some(0x150));
+}
+
+#[test]
+fn verify_client_with_certificate_verifier() {
+    // The verifier runs on the server too, over the client's chain.
+    let seen = Arc::new(Mutex::new(None));
+
+    let mut server_config = Config::new(PROTOCOL_VERSION).unwrap();
+    server_config
+        .load_cert_chain_from_pem_file("examples/cert.crt")
+        .unwrap();
+    server_config
+        .load_priv_key_from_pem_file("examples/cert.key")
+        .unwrap();
+    server_config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+    server_config.verify_peer(true);
+    server_config
+        .set_certificate_verifier({
+            let seen = Arc::clone(&seen);
+
+            move |chain, server_name| {
+                assert!(!chain.is_empty());
+                *seen.lock().unwrap() = Some(server_name.map(str::to_string));
+
+                CertificateVerdict::Untrusted
+            }
+        })
+        .unwrap();
+
+    let mut client_config = Config::new(PROTOCOL_VERSION).unwrap();
+    client_config
+        .load_cert_chain_from_pem_file("examples/cert.crt")
+        .unwrap();
+    client_config
+        .load_priv_key_from_pem_file("examples/cert.key")
+        .unwrap();
+    client_config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_and_server_config(
+        &mut client_config,
+        &mut server_config,
+    )
+    .unwrap();
+    assert_eq!(pipe.handshake(), Err(Error::TlsFail));
+
+    // The name is the one the client sent in the SNI extension.
+    assert_eq!(
+        seen.lock().unwrap().take(),
+        Some(Some("quic.tech".to_string()))
+    );
+}
+
+/// Returns the DER body of the first certificate of a PEM bundle.
+fn pem_to_der(pem: &[u8]) -> Vec<u8> {
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+
+    let pem = std::str::from_utf8(pem).unwrap();
+    let start = pem.find(BEGIN).unwrap() + BEGIN.len();
+    let end = pem.find(END).unwrap();
+
+    let base64: String = pem[start..end]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+
+    base64_decode(&base64)
+}
+
+/// Decodes standard base64 without padding checks, for the test fixtures.
+fn base64_decode(input: &str) -> Vec<u8> {
+    const ALPHABET: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut out = Vec::new();
+    let mut acc: u32 = 0;
+    let mut bits = 0;
+
+    for c in input.bytes().filter(|c| *c != b'=') {
+        let value = ALPHABET.iter().position(|a| *a == c).unwrap() as u32;
+
+        acc = (acc << 6) | value;
+        bits += 6;
+
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+
+    out
+}
+
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo) + Send + Sync>;
+
+/// Silences the panic hook for as long as it lives, so that a test which
+/// expects a panic doesn't print a backtrace. The hook is global, so the guard
+/// restores it even when the test itself panics.
+struct QuietPanics(Option<PanicHook>);
+
+impl QuietPanics {
+    fn new() -> QuietPanics {
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+
+        QuietPanics(Some(hook))
+    }
+}
+
+impl Drop for QuietPanics {
+    fn drop(&mut self) {
+        if let Some(hook) = self.0.take() {
+            std::panic::set_hook(hook);
+        }
+    }
+}
+
+/// Counts how often the certificate verifier that holds it is dropped.
+struct DropCounter(Arc<AtomicUsize>);
+
+impl Drop for DropCounter {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn certificate_verifier_outlives_config() {
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config.verify_peer(true);
+    config
+        .set_certificate_verifier({
+            let counter = DropCounter(Arc::clone(&drops));
+
+            move |_, _| {
+                let _ = &counter;
+
+                CertificateVerdict::Trusted
+            }
+        })
+        .unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
+
+    // The connection holds a reference to the TLS context, so the verifier
+    // has to survive the config that installed it.
+    drop(config);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+    assert_eq!(pipe.handshake(), Ok(()));
+
+    drop(pipe);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn certificate_verifier_replaced_is_dropped() {
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config
+        .set_certificate_verifier({
+            let counter = DropCounter(Arc::clone(&drops));
+
+            move |_, _| {
+                let _ = &counter;
+
+                CertificateVerdict::Untrusted
+            }
+        })
+        .unwrap();
+
+    config
+        .set_certificate_verifier(|_, _| CertificateVerdict::Trusted)
+        .unwrap();
+
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn verify_with_certificate_verifier_before_verify_peer() {
+    // The verifier is installed before the mode is set, so the setter has to
+    // keep working in either order.
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config
+        .set_certificate_verifier(|_, _| CertificateVerdict::Untrusted)
+        .unwrap();
+    config.verify_peer(true);
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Err(Error::TlsFail));
+}
+
+#[test]
+fn certificate_verifier_sees_full_chain() {
+    // The server sends a chain of two distinct certificates, so the order the
+    // verifier sees can be checked.
+    let leaf = pem_to_der(&std::fs::read("examples/cert.crt").unwrap());
+    let root = pem_to_der(&std::fs::read("examples/rootca.crt").unwrap());
+
+    let seen = Arc::new(Mutex::new(None));
+
+    let mut server_config = Config::new(PROTOCOL_VERSION).unwrap();
+    server_config
+        .load_cert_chain_from_pem_file("examples/cert-chain.crt")
+        .unwrap();
+    server_config
+        .load_priv_key_from_pem_file("examples/cert.key")
+        .unwrap();
+    server_config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut client_config = Config::new(PROTOCOL_VERSION).unwrap();
+    client_config.verify_peer(true);
+    client_config
+        .set_certificate_verifier({
+            let seen = Arc::clone(&seen);
+
+            move |chain, _| {
+                *seen.lock().unwrap() =
+                    Some(chain.iter().map(|c| c.to_vec()).collect::<Vec<_>>());
+
+                CertificateVerdict::Trusted
+            }
+        })
+        .unwrap();
+    client_config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_and_server_config(
+        &mut client_config,
+        &mut server_config,
+    )
+    .unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+
+    // The leaf comes first, then the certificate it chains up to.
+    assert_eq!(seen.lock().unwrap().take(), Some(vec![leaf, root]));
+}
+
+#[test]
+fn certificate_verifier_set_after_connect_is_ignored() {
+    // The TLS library copies the verification callback when it creates the
+    // connection, so a verifier installed later does not reach it.
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config.verify_peer(true);
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
+
+    config
+        .set_certificate_verifier(|_, _| CertificateVerdict::Trusted)
+        .unwrap();
+
+    // The built-in verification runs instead, and it has no anchor for the
+    // server's chain.
+    assert_eq!(pipe.handshake(), Err(Error::TlsFail));
+}
+
+#[test]
+fn certificate_verifier_replaced_after_connect() {
+    // Replacing the verifier while a connection exists reaches that
+    // connection, because the verifier is read at the time of the handshake.
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config.verify_peer(true);
+    config
+        .set_certificate_verifier({
+            let counter = DropCounter(Arc::clone(&drops));
+
+            move |_, _| {
+                let _ = &counter;
+
+                CertificateVerdict::Untrusted
+            }
+        })
+        .unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
+
+    config
+        .set_certificate_verifier(|_, _| CertificateVerdict::Trusted)
+        .unwrap();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+
+    assert_eq!(pipe.handshake(), Ok(()));
+}
+
+#[test]
+fn certificate_verifier_replaced_while_handshaking() {
+    // Several connections share one config, and the verifier is replaced while
+    // every one of them is inside it. A replaced verifier has to stay alive
+    // until the last call to it returns.
+    const CONNECTIONS: usize = 8;
+
+    // Long enough that the replace loop below runs well inside this window.
+    const INSIDE: Duration = Duration::from_millis(200);
+
+    let inside = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config.verify_peer(true);
+    config
+        .set_certificate_verifier({
+            let counter = DropCounter(Arc::clone(&drops));
+            let inside = Arc::clone(&inside);
+
+            move |_, _| {
+                let _ = &counter;
+
+                inside.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(INSIDE);
+
+                CertificateVerdict::Trusted
+            }
+        })
+        .unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+
+    let mut pipes = Vec::new();
+    for _ in 0..CONNECTIONS {
+        pipes.push(test_utils::Pipe::with_client_config(&mut config).unwrap());
+    }
+
+    let threads: Vec<_> = pipes
+        .into_iter()
+        .map(|mut pipe| std::thread::spawn(move || pipe.handshake()))
+        .collect();
+
+    // Wait until every connection is inside the verifier. The deadline turns a
+    // handshake that fails before it gets there into a failure rather than a
+    // test suite that hangs.
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    while inside.load(Ordering::SeqCst) < CONNECTIONS {
+        assert!(
+            Instant::now() < deadline,
+            "only {} of {} connections reached the verifier",
+            inside.load(Ordering::SeqCst),
+            CONNECTIONS
+        );
+
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    for _ in 0..64 {
+        config
+            .set_certificate_verifier(|_, _| CertificateVerdict::Trusted)
+            .unwrap();
+    }
+
+    // The slot no longer holds the first verifier, but the calls that are
+    // running still do.
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+    for thread in threads {
+        assert_eq!(thread.join().unwrap(), Ok(()));
+    }
+
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
 #[test]
